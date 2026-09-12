@@ -212,53 +212,75 @@ class OpenAQClient:
             if cached:
                 return cached
 
-        params = {
+        base_params = {
             "bbox": (f"{self.bbox['lon_min']},{self.bbox['lat_min']},"
                      f"{self.bbox['lon_max']},{self.bbox['lat_max']}"),
             "limit": 100,
-            "page": 1,
             "order_by": "id",
             "sort_order": "asc",
         }
 
-        # Try bounding box first, fall back to coordinates + radius
-        data = await self._rate_limited_request("locations", params)
-
-        if not data or "results" not in data:
-            # Fallback: query by coordinates center + radius (max 25km)
-            params = {
-                "coordinates": "28.6139,77.2090",
-                "radius": 25000,
-                "limit": 100,
-                "page": 1,
+        def _parse_location(loc: Dict) -> Dict:
+            # Record sensor -> parameter mapping (v3 /latest only returns
+            # sensorsId, so we resolve pollutant names via this map).
+            # Also derive the monitored-parameters set from sensors —
+            # the top-level "parameters" field is often empty.
+            params = set()
+            for s in loc.get("sensors") or []:
+                param = s.get("parameter")
+                if isinstance(param, dict):
+                    pname = param.get("name", "").lower()
+                    self._sensor_param_map[s.get("id")] = pname
+                    params.add(pname)
+            return {
+                "id": loc.get("id"),
+                "name": loc.get("name", "Unknown"),
+                "latitude": loc.get("coordinates", {}).get("latitude"),
+                "longitude": loc.get("coordinates", {}).get("longitude"),
+                "parameters": sorted(params),
+                "last_updated": (loc.get("datetimeLast") or {}).get("utc")
+                    if isinstance(loc.get("datetimeLast"), dict)
+                    else loc.get("datetimeLast"),
             }
-            data = await self._rate_limited_request("locations", params)
 
         locations = []
-        if data and "results" in data:
-            for loc in data["results"]:
-                # Record sensor -> parameter mapping (v3 /latest only returns
-                # sensorsId, so we resolve pollutant names via this map).
-                # Also derive the monitored-parameters set from sensors —
-                # the top-level "parameters" field is often empty.
-                params = set()
-                for s in loc.get("sensors") or []:
-                    param = s.get("parameter")
-                    if isinstance(param, dict):
-                        pname = param.get("name", "").lower()
-                        self._sensor_param_map[s.get("id")] = pname
-                        params.add(pname)
-                locations.append({
-                    "id": loc.get("id"),
-                    "name": loc.get("name", "Unknown"),
-                    "latitude": loc.get("coordinates", {}).get("latitude"),
-                    "longitude": loc.get("coordinates", {}).get("longitude"),
-                    "parameters": sorted(params),
-                    "last_updated": (loc.get("datetimeLast") or {}).get("utc")
-                        if isinstance(loc.get("datetimeLast"), dict)
-                        else loc.get("datetimeLast"),
-                })
+        # Paginate every page: the API sorts id-ascending, so page 1 is
+        # mostly dead archive monitors (2016–2022) while live ones sit on
+        # later pages / high ids. Fetching only page 1 starved the
+        # /latest fan-out of live locations (Sept 2026 incident: every
+        # station rendered 33h-stale CPCB data while fresh monitors on
+        # page 2 were never queried).
+        for page in range(1, 4):  # max 300 locations; Delhi NCR has ~116
+            params = dict(base_params, page=page)
+            # Try bounding box first, fall back to coordinates + radius
+            data = await self._rate_limited_request("locations", params)
 
+            if (not data or "results" not in data) and page == 1:
+                # Fallback: query by coordinates center + radius (max 25km)
+                params = {
+                    "coordinates": "28.6139,77.2090",
+                    "radius": 25000,
+                    "limit": 100,
+                    "page": 1,
+                }
+                data = await self._rate_limited_request("locations", params)
+
+            if not data or "results" not in data:
+                break
+            results = data["results"]
+            if not results:
+                break
+            locations.extend(_parse_location(loc) for loc in results)
+            if len(results) < 100:
+                break
+
+        if locations:
+            # Fresh monitors first (ISO-8601 UTC strings sort
+            # chronologically; missing timestamps sink to the end), so the
+            # [:N] slice in get_latest_measurements keeps live locations
+            # instead of dead archives.
+            locations.sort(key=lambda l: l.get("last_updated") or "",
+                           reverse=True)
             self._set_cached(cache_key, locations)
 
         logger.info(f"Found {len(locations)} OpenAQ locations in Delhi NCR")
@@ -305,11 +327,13 @@ class OpenAQClient:
             force_fresh=force_fresh)
 
         # Only locations that actually measure PM — limits API calls and
-        # skips stations without the pollutants we model.
+        # skips stations without the pollutants we model. The list arrives
+        # fresh-first (see get_locations_in_delhi), so this slice keeps
+        # live monitors instead of dead archives.
         locations = [
             loc for loc in locations
             if any(p in ("pm25", "pm10") for p in (loc.get("parameters") or []))
-        ][:50]
+        ][:60]
 
         all_readings = []
 

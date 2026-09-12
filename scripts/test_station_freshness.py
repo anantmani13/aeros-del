@@ -90,6 +90,70 @@ async def main():
     ok &= check("force_fresh ignores cache", fresh_data != ["CACHED-STALE"],
                 f"got {fresh_data}")
 
+    # 4. pagination + fresh-first ordering -------------------------------
+    def _loc(i, last, params=("pm25", "pm10")):
+        return {
+            "id": i, "name": f"station-{i}",
+            "coordinates": {"latitude": 28.6, "longitude": 77.2},
+            "sensors": [{"id": 100000 + i * 10 + n,
+                         "parameter": {"name": p}}
+                        for n, p in enumerate(params)],
+            "datetimeLast": {"utc": last} if last else None,
+        }
+
+    page1 = ([_loc(10, "2018-02-22T04:00:00Z"),
+              _loc(20, "2026-09-11T10:30:00Z")]
+             + [_loc(1000 + i, "2019-05-01T00:00:00Z", params=())
+                for i in range(98)])  # full page -> paginate on
+    page2 = [_loc(999001, "2026-09-12T19:00:00Z"),
+             _loc(999002, "2026-09-12T19:00:00Z")]
+    pages = {"calls": []}
+
+    async def fake_paged(endpoint, params=None, max_retries=3):
+        pages["calls"].append((endpoint, (params or {}).get("page")))
+        if endpoint == "locations":
+            pg = (params or {}).get("page", 1)
+            if pg == 1:
+                return {"results": page1}
+            if pg == 2:
+                return {"results": page2}
+            return {"results": []}
+        return {"results": []}
+
+    client2 = OpenAQClient()
+    client2._rate_limited_request = fake_paged
+    locs = await client2.get_locations_in_delhi(force_fresh=True)
+    head = [l["id"] for l in locs][:3]
+    ok &= check("both pages fetched", {10, 20, 999001, 999002}
+                <= {l["id"] for l in locs},
+                f"got {len(locs)} locations")
+    ok &= check("fresh-first ordering",
+                set(head[:2]) == {999001, 999002}, f"head={head}")
+    ok &= check("dead archive sinks last", locs[-1]["id"] == 10,
+                f"tail={[l['id'] for l in locs][-2:]}")
+
+    # ... and the [:N] slice in get_latest_measurements keeps live ones.
+    async def fake_latest(endpoint, params=None, max_retries=3):
+        if endpoint == "locations":
+            return {"results": page1 + page2}
+        loc_id = endpoint.split("/")[1]
+        return {"results": [{
+            "measurements": [],
+            "value": 42.0,
+            "parameter": {"name": "pm25"},
+            "datetime": {"utc": "2026-09-12T19:00:00Z"},
+            "coordinates": {"latitude": 28.6, "longitude": 77.2},
+            "id": loc_id, "name": f"station-{loc_id}",
+        }]}
+
+    client3 = OpenAQClient()
+    client3._rate_limited_request = fake_latest
+    got = await client3.get_latest_measurements(force_fresh=True)
+    got_ids = {r.station_id for r in got}
+    ok &= check("live locations reach /latest",
+                "999001" in got_ids and "999002" in got_ids,
+                f"got {sorted(got_ids)}")
+
     await svc.close()
 
     print("\nALL PASS" if ok else "\nSOME FAILURES")
