@@ -237,6 +237,64 @@ async def main():
                 and AQIService._sane_reading(fresh_private) is True
                 and AQIService._sane_reading(stale_official) is True)
 
+    # 5c. distance-weighted blending --------------------------------------
+    svc.stations = [
+        {"id": "s-north", "name": "Test Central North", "short_name": "Central N",
+         "latitude": 28.6000, "longitude": 77.2000},
+        {"id": "s-south", "name": "Test Central South", "short_name": "Central S",
+         "latitude": 28.5650, "longitude": 77.2000},
+    ]
+    mon_a = StationReading(
+        station_id="a", station_name="North Probe",
+        latitude=28.6100, longitude=77.2000, timestamp=new_ts,  # ~1.1 km N
+        pollutants={"pm25": 100.0}, source="openaq", provider="CPCB")
+    mon_b = StationReading(
+        station_id="b", station_name="South Probe",
+        latitude=28.5600, longitude=77.2000, timestamp=new_ts,  # ~4.4 km S
+        pollutants={"pm25": 40.0}, source="openaq", provider="AirNow")
+    m_blend = svc._match_readings([mon_a, mon_b], fresh_within_h=6)
+    v_n = m_blend.get("s-north", {}).get("pollutants", {}).get("pm25")
+    v_s = m_blend.get("s-south", {}).get("pollutants", {}).get("pm25")
+    ok &= check("blend leans to nearer monitor (not winner-take-all)",
+                v_n is not None and 90.0 < v_n < 100.0, f"got {v_n}")
+    ok &= check("nearby stations get different values",
+                v_n is not None and v_s is not None and v_n != v_s
+                and v_n > v_s,
+                f"got north={v_n} south={v_s}")
+    ok &= check("match tier recorded",
+                m_blend.get("s-north", {}).get("match_tier") == "fresh-ref",
+                f"got {m_blend.get('s-north', {}).get('match_tier')}")
+    # Co-located monitor: exact value, no singularity.
+    mon_home = StationReading(
+        station_id="h", station_name="Home Probe",
+        latitude=28.6000, longitude=77.2000, timestamp=new_ts,
+        pollutants={"pm25": 77.0}, source="openaq", provider="IMD")
+    m_home = svc._match_readings([mon_home], fresh_within_h=6)
+    ok &= check("co-located monitor exact, finite",
+                m_home.get("s-north", {}).get("pollutants", {}).get("pm25") == 77.0,
+                f"got {m_home.get('s-north', {}).get('pollutants')}")
+    # One voice per location: a 2-sensor site must not outweigh a
+    # single-sensor neighbour at ~4x the distance.
+    svc.stations = [{
+        "id": "s-one", "name": "Lone Station", "short_name": "Lone",
+        "latitude": 28.6000, "longitude": 77.2000}]
+    row1 = StationReading(
+        station_id="x", station_name="Busy Site A",
+        latitude=28.6050, longitude=77.2000, timestamp=new_ts,
+        pollutants={"pm25": 100.0}, source="openaq", provider="CPCB")
+    row2 = StationReading(
+        station_id="x", station_name="Busy Site A",
+        latitude=28.6050, longitude=77.2000, timestamp=new_ts,
+        pollutants={"pm25": 20.0}, source="openaq", provider="CPCB")
+    neigh = StationReading(
+        station_id="y", station_name="Far Probe",
+        latitude=28.6200, longitude=77.2000, timestamp=new_ts,
+        pollutants={"pm25": 40.0}, source="openaq", provider="CPCB")
+    m_dup = svc._match_pool([row1, row2, neigh])
+    v_dup = m_dup.get("s-one", {}).get("pollutants", {}).get("pm25")
+    ok &= check("multi-sensor site counts once",
+                v_dup is not None and 90.0 < v_dup < 100.0, f"got {v_dup}")
+
     # 6. CAMS parse: latest slot <= now, co µg/m³ -> mg/m³ ----------------
     cams = CAMSClient()
     real_now = datetime.now(timezone.utc).replace(minute=0, second=0,

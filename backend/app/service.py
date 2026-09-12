@@ -921,7 +921,7 @@ class AQIService:
                 if remaining:
                     matched.update(self._match_pool(
                         fresh, radius_km=self.FRESH_REF_RADIUS_KM,
-                        only_ids=remaining))
+                        only_ids=remaining, pool_name="fresh-ref"))
                 # Tier 2 — stale reference fallback (STALE-badged).
                 remaining = _remaining()
                 if remaining:
@@ -931,14 +931,30 @@ class AQIService:
                     if pool:
                         matched.update(self._match_pool(
                             pool, radius_km=self.STALE_REF_RADIUS_KM,
-                            only_ids=remaining))
+                            only_ids=remaining, pool_name="stale-ref"))
                 return matched
         return self._match_pool([r for r in ref
                                  if self._sane_reading(r)])
 
+    # Blending constants: inverse-distance-squared weights, name-anchor
+    # counts as a 4x boost (exactly the old "halve the distance" rule in
+    # 1/d² terms), epsilon avoids a singularity for co-located monitors.
+    BLEND_TOP_K = 5
+    BLEND_ANCHOR_BOOST = 4.0
+    BLEND_EPS_KM2 = 0.25
+
     def _match_pool(self, readings: List[Any], radius_km: float = 25.0,
-                    only_ids: Optional[set] = None) -> Dict[str, Dict]:
-        """Match one pool of readings to stations (see _match_readings)."""
+                    only_ids: Optional[set] = None,
+                    pool_name: Optional[str] = None) -> Dict[str, Dict]:
+        """Match one pool of readings to stations (see _match_readings).
+
+        Distance-weighted blending: each station's pollutants are an
+        inverse-distance-squared blend of the nearest monitors in the
+        pool — not a clone of a single winner. Stations a few km apart
+        therefore get genuinely different values, and one noisy sensor
+        cannot dictate a whole district. Timestamp/source/distance come
+        from the top-weight contributor.
+        """
         mapped = {}
         for station in self.stations:
             if only_ids is not None and station["id"] not in only_ids:
@@ -946,15 +962,7 @@ class AQIService:
             lat, lon = station["latitude"], station["longitude"]
             name_keys = self._station_name_keys(station)
 
-            # OpenAQ returns one reading per pollutant; pick the nearest
-            # reading for each pollutant individually so a mid-city monitor
-            # does not masquerade for a far suburb station.
-            best_pollutants: Dict[str, float] = {}
-            best_pollutant_dist: Dict[str, float] = {}
-            best = None
-            best_eff = radius_km  # km radius on effective (anchor-weighted) distance
-            best_dist = radius_km
-
+            cands = []  # (eff_d, raw_d, boost, reading) within radius
             for reading in readings:
                 rlat = getattr(reading, "latitude", None)
                 rlon = getattr(reading, "longitude", None)
@@ -962,29 +970,59 @@ class AQIService:
                     continue
                 d = self._haversine(lat, lon, rlat, rlon)
                 # Name anchor: shared token halves effective distance so the
-                # correctly-named monitor wins over a nearer wrong one.
+                # correctly-named monitor weighs heaviest.
                 rname = str(getattr(reading, "station_name", "") or "").lower()
                 anchored = any(k in rname for k in name_keys)
-                eff_d = d * 0.5 if anchored else d
-                if eff_d <= radius_km:  # km radius on effective distance
-                    if best is None or eff_d < best_eff:
-                        best_eff = eff_d
-                        best_dist = d
-                        best = reading
-                    for k, v in (reading.pollutants or {}).items():
-                        if v is None:
-                            continue
-                        if k not in best_pollutant_dist or d < best_pollutant_dist[k]:
-                            best_pollutant_dist[k] = d
-                            best_pollutants[k] = v
+                eff_d = d / 2.0 if anchored else d
+                if eff_d <= radius_km:
+                    cands.append((eff_d, d,
+                                  self.BLEND_ANCHOR_BOOST if anchored else 1.0,
+                                  reading))
+            if not cands:
+                continue
+            cands.sort(key=lambda c: (c[0], c[1]))
+            top = cands[0][3]
+            top_dist = cands[0][1]
 
-            if best is not None:
-                mapped[station["id"]] = {
-                    "pollutants": best_pollutants,
-                    "timestamp": best.timestamp,
-                    "source": "live",
-                    "matched_distance_km": round(best_dist, 1),
-                }
+            blended: Dict[str, float] = {}
+            held = set()
+            for _, _, _, r in cands:
+                held.update((r.pollutants or {}).keys())
+            for pollutant in held:
+                # One voice per location: v3 /latest returns one row per
+                # sensor, so a 5-sensor site would otherwise outweigh a
+                # single-sensor neighbour 5-to-1 at the same distance.
+                holders = []
+                seen_sites = set()
+                for eff_d, d, boost, r in cands:
+                    v = (r.pollutants or {}).get(pollutant)
+                    if v is None:
+                        continue
+                    site = getattr(r, "station_id", None) or id(r)
+                    if site in seen_sites:
+                        continue
+                    seen_sites.add(site)
+                    holders.append((eff_d, d, boost, v))
+                    if len(holders) >= self.BLEND_TOP_K:
+                        break
+                num = sum(b * v / (dd * dd + self.BLEND_EPS_KM2)
+                          for _, dd, b, v in holders)
+                den = sum(b / (dd * dd + self.BLEND_EPS_KM2)
+                          for _, dd, b, _ in holders)
+                if den > 0:
+                    blended[pollutant] = round(num / den, 2)
+
+            if not blended:
+                continue
+            mapped[station["id"]] = {
+                "pollutants": blended,
+                "timestamp": top.timestamp,
+                "source": "live",
+                "matched_distance_km": round(top_dist, 1),
+                "match_tier": pool_name,
+                "blended_from": len({getattr(r, "station_id", None)
+                                     or id(r) for _, _, _, r in cands}),
+            }
         return mapped
 
     def _demo_readings(self) -> Dict[str, Dict]:
