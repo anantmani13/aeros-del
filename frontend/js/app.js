@@ -1,0 +1,467 @@
+/* ═══════════════════════════════════════════════════════════════
+   AEROS — Main Application Controller
+   Boots modules, owns application state, wires WebSocket + UI.
+   ═══════════════════════════════════════════════════════════════ */
+(function (global) {
+  'use strict';
+
+  const App = {
+    state: {
+      snapshot: null,
+      stationLookup: {},
+      selectedStation: null,
+      timeHour: 0,
+      pollutant: 'pm25',
+      stationFilter: '',
+      alertLang: 'en',
+      alertCache: {},
+      exportPayload: null,
+    },
+
+    async boot() {
+      // ── Modules ────────────────────────────────────────────────
+      this.live = new LiveSocket(Utils.wsUrl('/ws/live'));
+      this.live.setStatusEl(document.getElementById('wsStatus'));
+      this.live.onMessage((msg) => this.onServerMessage(msg));
+
+      // Public client config first (map tiles) — tiny, fast endpoint.
+      let mapKey = null;
+      try {
+        const cfg = await Utils.fetchJSON('/api/v1/config');
+        mapKey = cfg.maptiler_key || null;
+      } catch (e) {
+        console.warn('config fetch failed — using default basemap', e);
+      }
+
+      this.map = new AeriMap('map', mapKey);
+      this.map.onStationClick = (id) => this.selectStation(id);
+
+      this.plume = new PlumeOverlay(this.map.map);
+      this.aisiGauge = new AISIGauge(document.getElementById('aisiGauge'));
+      this.alertPanel = new AlertPanel(
+        document.getElementById('alertList'),
+        document.getElementById('tickerTrack'),
+        document.getElementById('tickerMeta'),
+      );
+      this.forecastChart = new ForecastChart(
+        document.getElementById('forecastChart')
+      );
+
+      // ── Wire UI events ─────────────────────────────────────────
+      this._wireControls();
+
+      // Live clock
+      this._tick();
+      setInterval(() => this._tick(), 1000);
+
+      // Initial load: REST snapshot then WS live
+      try {
+        const snap = await Utils.fetchJSON('/api/v1/snapshot');
+        this.onSnapshot(snap);
+      } catch (e) {
+        console.warn('REST snapshot failed — waiting for WebSocket', e);
+      }
+      this.live.connect();
+
+      // Ticker placeholder until first alert arrives
+      this.alertPanel.renderTicker(null, 'connecting to data feed…');
+    },
+
+    _wireControls() {
+      document.getElementById('btnRefresh').addEventListener('click', () => {
+        const st = document.getElementById('mapStatus');
+        if (st) st.textContent = 'refresh requested — pipeline running…';
+        if (this.live && this.live.socket && this.live.socket.readyState === 1) {
+          this.live.send('refresh');
+        } else {
+          Utils.fetchJSON('/api/v1/forecast/trigger?force=true').then((r) => {
+            if (r.refreshed) console.log('Refresh triggered', r.last_update);
+          });
+        }
+      });
+
+      const timeSlider = document.getElementById('timeSlider');
+      timeSlider.addEventListener('input', () => {
+        const h = Number(timeSlider.value);
+        this.state.timeHour = h;
+        document.getElementById('timeReadout').textContent = `H+${h}`;
+        const alt = document.getElementById('timeAlt');
+        if (alt) alt.textContent = this._horizonLabel(h);
+        if (this.map) this.map.setTime(h);
+      });
+
+      document.querySelectorAll('.pollutant-tabs button').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.pollutant-tabs button').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          this.state.pollutant = btn.dataset.p;
+          if (this.forecastChart) this.forecastChart.setPollutant(btn.dataset.p);
+        });
+      });
+
+      const toggleMap = (id, elId) => {
+        const el = document.getElementById(elId);
+        el.addEventListener('change', () => {
+          if (this.map) this.map.toggleLayer(id, el.checked);
+        });
+      };
+      toggleMap('heat', 'layHeat');
+      toggleMap('fires', 'layFires');
+      toggleMap('plumes', 'layPlumes');
+      toggleMap('stations', 'layStations');
+
+      // Station search (filters the rendered rows only)
+      const searchEl = document.getElementById('stationSearch');
+      if (searchEl) {
+        const applyFilter = Utils.debounce(() => {
+          this.state.stationFilter = (searchEl.value || '').trim().toLowerCase();
+          if (this.state.snapshot) this._renderStations(this.state.snapshot.stations);
+        }, 150);
+        searchEl.addEventListener('input', applyFilter);
+      }
+
+      // Forecast CSV export
+      const csvBtn = document.getElementById('btnCsv');
+      if (csvBtn) csvBtn.addEventListener('click', () => this._exportCSV());
+
+      // Advisory language toggle (EN / हिंदी — same data, template engine)
+      document.querySelectorAll('#langToggle button').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('#langToggle button').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          this.state.alertLang = btn.dataset.lang;
+          this._renderAlertsForLang();
+        });
+      });
+    },
+
+    async onServerMessage(msg) {
+      if (msg.type === 'snapshot' || msg.type === 'update') {
+        this.onSnapshot(msg);
+      } else if (msg.type === 'refresh_started') {
+        const st = document.getElementById('mapStatus');
+        if (st) st.textContent = 'refreshing live pipeline…';
+      }
+    },
+
+    onSnapshot(snap) {
+      this.state.snapshot = snap;
+
+      // Header metrics
+      this._renderDomainMetrics(snap.domain_summary, snap.aisi);
+
+      // AISI (+ cache PBL height for the horizon readout)
+      this._renderAisi(snap.aisi);
+      const pblM = snap.aisi?.pbl?.pbl_height_m;
+      if (pblM != null) {
+        this.state.pblM = pblM;
+        const pn = document.getElementById('pblNote');
+        if (pn) pn.textContent = `· PBL now ~${Math.round(pblM)} m`;
+        const alt = document.getElementById('timeAlt');
+        if (alt) alt.textContent = this._horizonLabel(this.state.timeHour);
+      }
+
+      // Stations
+      this._renderStations(snap.stations);
+      const st = this.state.selectedStation;
+      const stNow = st && this.state.stationLookup[st];
+      if (stNow) {
+        this.selectStation(st, true); // refresh forecast chart
+      } else {
+        const firstOnline = (snap.stations || []).find((s) => s.current);
+        if (firstOnline) this.selectStation(firstOnline.id);
+      }
+
+      // Map
+      this._updateMap(snap);
+
+      // Alerts + ticker (language-aware; non-English cache is per-snapshot)
+      this.state.alertCache = {};
+      this._renderAlertsForLang(snap.alerts || []);
+
+      // Mode badge + last-updated stamp
+      const badge = document.getElementById('modeBadge');
+      const src = snap.data_source || 'demo';
+      badge.textContent = src.toUpperCase();
+      badge.className = 'mode-badge ' + src;
+      const upd = document.getElementById('updatedAt');
+      if (upd) {
+        upd.textContent = snap.last_update
+          ? `Updated ${Utils.fmtDT(snap.last_update)} · ${src.toUpperCase()}`
+          : '—';
+      }
+    },
+
+    _tickerMeta() {
+      const dom = this.state.snapshot?.domain_summary;
+      return dom ? `${dom.station_count} stations · ${dom.fire_count} fires` : '';
+    },
+
+    _horizonLabel(h) {
+      // Absolute IST wall-time of the slider position + mixing-layer height.
+      const base = new Date();
+      base.setUTCMinutes(0, 0, 0);
+      base.setUTCHours(base.getUTCHours() + 1 + h);
+      const s = base.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+      const pbl = this.state.pblM != null ? ` · PBL ~${Math.round(this.state.pblM)} m` : '';
+      return `${s} IST${pbl}`;
+    },
+
+    _renderAlertsForLang(snapshotAlerts) {
+      const lang = this.state.alertLang;
+      const fromSnap = snapshotAlerts !== undefined
+        ? snapshotAlerts
+        : (this.state.snapshot?.alerts || []);
+      if (lang === 'en') {
+        this.alertPanel.render(fromSnap);
+        if (fromSnap.length) this.alertPanel.renderTicker(fromSnap[0], this._tickerMeta());
+        return;
+      }
+      const cached = this.state.alertCache[lang];
+      if (cached) {
+        this.alertPanel.render(cached);
+        if (cached.length) this.alertPanel.renderTicker(cached[0], this._tickerMeta());
+        return;
+      }
+      this.alertPanel.render([{ title: '…', summary: 'Advisory load ho rahi hai…' }]);
+      Utils.fetchJSON(`/api/v1/alerts?lang=${encodeURIComponent(lang)}&limit=6`)
+        .then((r) => {
+          if (this.state.alertLang !== lang) return; // stale response
+          const items = r.alerts || [];
+          this.state.alertCache[lang] = items;
+          this.alertPanel.render(items);
+          if (items.length) this.alertPanel.renderTicker(items[0], this._tickerMeta());
+        })
+        .catch(() => {
+          if (this.state.alertLang !== lang) return;
+          this.alertPanel.render(fromSnap); // fall back to English
+        });
+    },
+
+    _renderDomainMetrics(dom, aisi) {
+      document.getElementById('mMeanAqi').textContent = dom?.mean_aqi != null ? dom.mean_aqi : '—';
+      document.getElementById('mFires').textContent = dom?.fire_count != null ? dom.fire_count : '—';
+      document.getElementById('mAisi').textContent = aisi?.aisi != null ? aisi.aisi : '—';
+      const worst = dom?.worst;
+      const worstEl = document.getElementById('mWorst');
+      if (worst) {
+        const c = worst.color || '#fff';
+        worstEl.textContent = `${worst.station_name?.split(',')[0] || '—'} (${worst.aqi})`;
+        worstEl.style.color = c;
+        worstEl.style.textShadow = `0 0 12px ${c}`;
+      } else {
+        worstEl.textContent = '—';
+      }
+
+      const m = document.getElementById('mMeanAqi');
+      if (dom?.mean_aqi != null) {
+        const c = Utils.aqiColor(dom.mean_aqi);
+        m.style.color = c;
+        m.style.textShadow = `0 0 12px ${c}`;
+      }
+    },
+
+    _renderAisi(aisi) {
+      if (!aisi || aisi.aisi == null) return;
+      const a = aisi.aisi;
+      const color = aisi.color || Utils.aqiColor(Math.min(500, a * 50));
+      this.aisiGauge.update(a, color);
+
+      document.getElementById('aisiValue').textContent = a.toFixed(1);
+      document.getElementById('aisiValue').style.color = color;
+      document.getElementById('aisiValue').style.textShadow = `0 0 18px ${color}`;
+      document.getElementById('aisiCategory').textContent = aisi.category || '—';
+
+      const trendEl = document.getElementById('aisiTrend');
+      const t = aisi.trend || {};
+      trendEl.textContent = `${t.icon || '→'} ${t.direction || 'Stable'} (Δ${t.delta ?? 0})`;
+
+      const grap = aisi.grap || {};
+      document.getElementById('grapBadge').textContent =
+        `GRAP Recommendation: Stage ${grap.stage || 'None'} — ${grap.label || 'Normal'}`;
+
+      drawSparkline(document.getElementById('aisiSpark'), aisi.history || [], color);
+
+      // Screen pulse on extreme inversion
+      if (a.threshold_warning) {
+        this._pulse();
+      }
+    },
+
+    _renderStations(stations) {
+      const online = (stations || []).filter((s) => s.current);
+      document.getElementById('stationCount').textContent =
+        `${online.length} online`;
+
+      this.state.stationLookup = {};
+      online.forEach((s) => { this.state.stationLookup[s.id] = s; });
+
+      const q = this.state.stationFilter;
+      const rows = online.filter((s) => !q ||
+        ((s.short_name || '') + ' ' + (s.name || '')).toLowerCase().includes(q));
+
+      const listEl = document.getElementById('stationList');
+      if (!rows.length) {
+        listEl.innerHTML = '<div class="dim" style="font-size:12px">No stations match.</div>';
+        return;
+      }
+      listEl.innerHTML = rows
+        .sort((a, b) => (b.current?.aqi || 0) - (a.current?.aqi || 0))
+        .map((s) => {
+          const c = s.current || {};
+          const color = c.color || '#808080';
+          const sel = this.state.selectedStation === s.id ? 'selected' : '';
+          return `
+            <div class="station-row ${sel}" style="--row-color:${color}" data-id="${Utils.esc(s.id)}">
+              <span class="dot-ind"></span>
+              <div class="meta">
+                <div class="name">${Utils.esc(s.short_name || s.name)}</div>
+                <div class="zone">${Utils.esc(c.category || '—')} · ${Utils.esc(c.timestamp ? Utils.fmtTime(c.timestamp) : '')}</div>
+              </div>
+              <span class="aqi">${c.aqi != null ? c.aqi : '—'}</span>
+            </div>`;
+        })
+        .join('');
+
+      listEl.querySelectorAll('.station-row').forEach((row) => {
+        row.addEventListener('click', () => {
+          this.selectStation(row.dataset.id);
+        });
+      });
+    },
+
+    selectStation(id, alreadySelected) {
+      const station = this.state.stationLookup[id];
+      if (!station) return;
+      this.state.selectedStation = id;
+
+      document.querySelectorAll('.station-row').forEach((r) => {
+        r.classList.toggle('selected', r.dataset.id === id);
+      });
+
+      const forecast =
+        this.state.snapshot?.forecasts?.[id] ||
+        (station.forecast) || null;
+
+      if (forecast) {
+        this.forecastChart.setHistory(station.history || []);
+        this.forecastChart.setData(forecast);
+        this.state.exportPayload = { station, forecast };
+        const model = Object.keys(forecast.models || {})
+          .filter((k) => forecast.models[k]);
+        const histN = (station.history || []).length;
+        document.getElementById('modelNotes').textContent =
+          `Ensemble: ${model.join(' + ') || 'statistical baseline'} · ${forecast.timestamps.length}h` +
+          (histN ? ` · green = observed past ${Math.min(histN, 24)} readings` : '');
+      }
+
+      // Keep map in sync with selected station
+      if (!alreadySelected && this.map) {
+        this.map._flyTo(station.longitude, station.latitude);
+      }
+      // Clicking a station snaps the slider to now
+      if (!alreadySelected) {
+        const slider = document.getElementById('timeSlider');
+        slider.value = 0;
+        document.getElementById('timeReadout').textContent = 'H+0';
+      }
+    },
+
+    _updateMap(snap) {
+      const stations = (snap.stations || []).filter((s) => s.current);
+      const stationFC = {
+        type: 'FeatureCollection',
+        features: stations.map((s) => {
+          const c = s.current;
+          return {
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [s.longitude, s.latitude] },
+            properties: {
+              id: s.id,
+              name: s.short_name,
+              pm25: c.pollutants?.pm25 || 0,
+              aqi: c.aqi || 0,
+              category: c.category || 'Unknown',
+              color: c.color || '#808080',
+            },
+          };
+        }),
+      };
+
+      // Fires → GeoJSON
+      const fireFC = {
+        type: 'FeatureCollection',
+        features: (snap.fires || []).map((fire) => ({
+          type: 'Feature',
+          geometry: {
+            type: 'Point',
+            coordinates: [fire.longitude, fire.latitude],
+          },
+          properties: {
+            frp: fire.frp || 0,
+            latitude: fire.latitude,
+            longitude: fire.longitude,
+            region: fire.region || '',
+            confidence: fire.confidence || '',
+          },
+        })),
+      };
+
+      const plumesFC = (snap.plume && snap.plume.geojson) || { type: 'FeatureCollection', features: [] };
+
+      this.map.update(
+        snap.spatial || stationFC,
+        stationFC,
+        fireFC,
+        plumesFC,
+      );
+      this.map.setForecasts(snap.forecasts || {}, this.state.stationLookup);
+      this.map.setTime(this.state.timeHour);
+
+      this.plume.update(snap.plume);
+    },
+
+    _exportCSV() {
+      const p = this.state.exportPayload;
+      if (!p || !p.forecast) return;
+      const f = p.forecast;
+      const head = 'timestamp,pm25_ugm3,pm10_ugm3,aqi,category\n';
+      const rows = (f.timestamps || []).map((t, i) => [
+        t,
+        f.pm25?.[i] ?? '',
+        f.pm10?.[i] ?? '',
+        f.aqi?.[i] ?? '',
+        `"${f.category?.[i] ?? ''}"`,
+      ].join(',')).join('\n');
+      const blob = new Blob([head + rows], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `aeros_forecast_${p.station.id || 'station'}_${Date.now()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+    },
+
+    _tick() {
+      const now = new Date();
+      document.getElementById('clock').textContent =
+        now.toLocaleTimeString('en-IN', { hour12: false });
+      document.getElementById('date').textContent =
+        now.toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+    },
+
+    _pulse() {
+      const layer = document.getElementById('pulseLayer');
+      const ring = document.createElement('div');
+      ring.className = 'pulse-ring';
+      layer.appendChild(ring);
+      setTimeout(() => ring.remove(), 2000);
+    },
+  };
+
+  document.addEventListener('DOMContentLoaded', () => App.boot());
+  global.App = App;
+})(window);

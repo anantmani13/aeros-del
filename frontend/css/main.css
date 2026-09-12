@@ -1,0 +1,94 @@
+/* ═══════════════════════════════════════════════════════════════
+   AEROS — Design System & Tokens
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Colors ─────────────────────────────────────────────────── */
+  --bg-deep: #0a0e27;
+  --bg-panel: rgba(255, 255, 255, 0.06);
+  --bg-panel-strong: rgba(18, 24, 56, 0.85);
+  --electric: #00d4ff;
+  --toxic: #39ff14;
+  --amber: #ffb800;
+  --danger: #ff3838;
+  --glass: rgba(255, 255, 255, 0.06);
+  --glass-border: rgba(255, 255, 255, 0.10);
+  --text-strong: #ffffff;
+  --text-mid: rgba(255, 255, 255, 0.72);
+  --text-dim: rgba(255, 255, 255, 0.45);
+
+  /* AQI scale */
+  --aqi-good: #00e400;
+  --aqi-satisfactory: #9cff9c;
+  --aqi-moderate: #ffff00;
+  --aqi-poor: #ff7e00;
+  --aqi-vpoor: #ff0000;
+  --aqi-severe: #99004c;
+  --aqi-severe-plus: #7e0023;
+
+  /* ── Typography ─────────────────────────────────────────────── */
+  --font-head: 'Inter', system-ui, sans-serif;
+  --font-data: 'JetBrains Mono', monospace;
+  --font-body: system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* ── Shape & elevation ──────────────────────────────────────── */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --glow-electric: 0 0 18px rgba(0, 212, 255, 0.35);
+  --glow-green: 0 0 18px rgba(57, 255, 20, 0.30);
+  --glow-red: 0 0 22px rgba(255, 56, 56, 0.45);
+  --shadow-panel: 0 10px 40px rgba(0, 0, 0, 0.5);
+
+  /* ── Spacing ────────────────────────────────────────────────── */
+  --space-1: 6px;
+  --space-2: 12px;
+  --space-3: 20px;
+  --space-4: 32px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-body);
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(0, 212, 255, 0.08), transparent 60%),
+    radial-gradient(1000px 700px at 10% 110%, rgba(57, 255, 20, 0.05), transparent 60%),
+    var(--bg-deep);
+  color: var(--text-strong);
+  overflow: hidden;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-head);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.accent {
+  color: var(--electric);
+}
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 212, 255, 0.4); }
+
+/* Utility */
+.mono { font-family: var(--font-data); }
+.dim { color: var(--text-dim); }
+.strong { color: var(--text-strong); }
+
+button, input { font-family: var(--font-body); outline: none; }

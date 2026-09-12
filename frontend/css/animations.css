@@ -1,0 +1,60 @@
+/* ═══════════════════════════════════════════════════════════════
+   AEROS — Animations & Micro-interactions
+   ═══════════════════════════════════════════════════════════════ */
+
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
+
+@keyframes skeleton {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+
+@keyframes pulse-ring {
+  0% { opacity: 0.6; transform: scale(0.98); }
+  100% { opacity: 0; transform: scale(1.04); }
+}
+
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+
+@keyframes fire-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.95; }
+  50% { transform: scale(1.6); opacity: 0.55; }
+}
+
+@keyframes gauge-needle {
+  from { transform: rotate(-60deg); }
+  to { transform: rotate(var(--needle-rot, 0deg)); }
+}
+
+@keyframes fade-slide-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pop-in {
+  0% { opacity: 0; transform: scale(0.9); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.fade-in { animation: fade-slide-in 0.35s ease both; }
+.pop-in { animation: pop-in 0.25s ease both; }
+
+/* Smooth map transitions handled by MapLibre; keep CSS FPS light */
+body {
+  transition: background-color 0.5s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+  .ticker-track .ticker-text { animation: none; padding-left: 0; }
+}

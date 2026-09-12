@@ -1,0 +1,111 @@
+/* ═══════════════════════════════════════════════════════════════
+   AEROS — Reusable Component Styles
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Loading shimmer ──────────────────────────────────────────── */
+.shimmer {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-sm);
+}
+.shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.09),
+    transparent
+  );
+  animation: shimmer 1.4s infinite;
+}
+
+/* ── Status badges ────────────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-data);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+/* ── Skeleton generic ─────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(
+    100deg, rgba(255,255,255,0.05) 40%, rgba(255,255,255,0.11) 50%,
+    rgba(255,255,255,0.05) 60%
+  );
+  background-size: 200% 100%;
+  animation: skeleton 1.2s linear infinite;
+  border-radius: var(--radius-sm);
+  height: 12px;
+  margin: 4px 0;
+}
+
+/* ── Header "last updated" stamp ────────────────────────────────── */
+.updated {
+  font-family: var(--font-data);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* ── Station search ─────────────────────────────────────────────── */
+.station-search-wrap { margin-bottom: 8px; }
+.station-search {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-strong);
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  outline: none;
+}
+.station-search::placeholder { color: var(--text-dim); }
+.station-search:focus { border-color: var(--electric); box-shadow: var(--glow-electric); }
+
+/* ── Mini action button (CSV export) ────────────────────────────── */
+.mini-btn {
+  font-family: var(--font-data);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-mid);
+  background: transparent;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 3px 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.mini-btn:hover { color: var(--toxic); border-color: var(--toxic); }
+
+/* ── Advisory language toggle ───────────────────────────────────── */
+.lang-toggle { display: flex; gap: 4px; }
+.lang-toggle button {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.lang-toggle button.active {
+  color: var(--electric);
+  border-color: var(--electric);
+  background: rgba(0,212,255,0.12);
+}
+
+/* ── Ticker: pause on hover so advisories stay readable ─────────── */
+.ticker-bar:hover .ticker-track .ticker-text { animation-play-state: paused; }

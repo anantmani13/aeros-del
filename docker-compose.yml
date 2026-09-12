@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  aqi-backend:
+    build: .
+    container_name: sih-aqi-system
+    ports:
+      - "8000:8000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      DEMO_MODE: "${DEMO_MODE:-false}"
+      OPENAQ_API_KEY: "${OPENAQ_API_KEY:-}"
+      OPENWEATHER_API_KEY: "${OPENWEATHER_API_KEY:-}"
+      NASA_FIRMS_API_KEY: "${NASA_FIRMS_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      MAPTILER_KEY: "${MAPTILER_KEY:-}"
+      DATA_REFRESH_INTERVAL: "300"
+    volumes:
+      - ./data:/app/data
+      - ./backend/models:/app/backend/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped

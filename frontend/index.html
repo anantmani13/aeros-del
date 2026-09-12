@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AEROS — Delhi NCR AQI Forecasting System</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/animations.css">
+</head>
+<body>
+  <!-- ═══════════════════ Header ═══════════════════ -->
+  <header class="topbar glass">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 48 48" width="38" height="38" aria-hidden="true">
+          <defs>
+            <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#00d4ff"/>
+              <stop offset="100%" stop-color="#39ff14"/>
+            </linearGradient>
+          </defs>
+          <circle cx="24" cy="24" r="21" fill="rgba(0,212,255,0.08)" stroke="url(#brandGrad)" stroke-width="2"/>
+          <path d="M24 6 C32 12 36 18 36 26 a12 12 0 1 1 -24 0 C12 18 16 12 24 6Z"
+                fill="rgba(0,212,255,0.18)" stroke="url(#brandGrad)" stroke-width="1.6"/>
+          <path d="M14 30 C20 26 28 26 34 30" fill="none" stroke="#39ff14" stroke-width="2" stroke-dasharray="3 3"/>
+          <circle cx="24" cy="24" r="3" fill="#00d4ff"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>AEROS<span class="accent"> ·DEL</span></h1>
+        <p>Coupled Meteorology–Chemistry AQI Forecast</p>
+      </div>
+    </div>
+
+    <div class="domain-metrics" id="domainMetrics">
+      <div class="metric">
+        <span class="metric-label">Mean AQI</span>
+        <span class="metric-value" id="mMeanAqi">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Worst Station</span>
+        <span class="metric-value" id="mWorst">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Active Fires</span>
+        <span class="metric-value" id="mFires">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">AISI</span>
+        <span class="metric-value" id="mAisi">—</span>
+      </div>
+    </div>
+
+    <div class="header-controls">
+      <span class="mode-badge" id="modeBadge">—</span>
+      <div class="updated" id="updatedAt" title="Last data refresh">—</div>
+      <div class="clock-wrap">
+        <div class="clock" id="clock">--:--:--</div>
+        <div class="date" id="date">—</div>
+      </div>
+      <button class="icon-btn" id="btnRefresh" title="Refresh now">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>
+        </svg>
+      </button>
+      <span class="ws-status" id="wsStatus" title="WebSocket status"></span>
+    </div>
+  </header>
+
+  <!-- ═══════════════════ Main Layout ═══════════════════ -->
+  <main class="layout">
+    <!-- ── Map canvas ── -->
+    <section class="map-panel">
+      <div class="map-stage glass">
+        <div id="map"></div>
+
+        <div class="map-overlay top-left">
+          <div class="panel-title">Live Spatial AQI · Delhi NCR</div>
+          <div class="legend" id="aqiLegend">
+            <span style="--c:#00e400">Good</span>
+            <span style="--c:#9cff9c">Sat</span>
+            <span style="--c:#ffff00">Mod</span>
+            <span style="--c:#ff7e00">Poor</span>
+            <span style="--c:#ff0000">VPoor</span>
+            <span style="--c:#99004c">Severe</span>
+            <span style="--c:#7e0023">S+</span>
+          </div>
+        </div>
+
+        <div class="map-overlay top-right">
+          <div class="layer-toggles">
+            <label class="toggle"><input type="checkbox" id="layHeat" checked><span class="dot" style="--c:#00d4ff"></span>PM2.5 Heat</label>
+            <label class="toggle" title="Active fire / ash hotspots — marker size scales with FRP (MW)"><input type="checkbox" id="layFires" checked><span class="dot" style="--c:#ff3838"></span>Fires</label>
+            <label class="toggle"><input type="checkbox" id="layPlumes" checked><span class="dot" style="--c:#ffb800"></span>Plumes</label>
+            <label class="toggle"><input type="checkbox" id="layStations" checked><span class="dot" style="--c:#9cff9c"></span>Stations</label>
+          </div>
+        </div>
+
+        <div class="map-overlay bottom-center slider-bar">
+          <span class="slider-label">Forecast Horizon</span>
+          <input type="range" id="timeSlider" min="0" max="72" value="0">
+          <span class="slider-readout" id="timeReadout">H+0</span>
+          <span class="slider-alt" id="timeAlt" style="font-size:11px;opacity:.75"></span>
+        </div>
+        <div class="map-overlay bottom-left altitude-note" id="altNote"
+             style="font-size:11px;opacity:.8;max-width:46ch">
+          Red dots = active fire/ash hotspots (size ∝ FRP) ·
+          particles at breathing zone ~2 m, plume injection ~50 m, mixed through PBL
+          <span id="pblNote">—</span>
+        </div>
+
+        <div class="map-status" id="mapStatus">initializing map…</div>
+      </div>
+    </section>
+
+    <!-- ── Right stack ── -->
+    <aside class="side-panel">
+      <!-- AISI gauge -->
+      <section class="card glass" id="aisiCard">
+        <div class="card-head">
+          <h2>AISI — Inversion Severity</h2>
+          <span class="trend-chip" id="aisiTrend"></span>
+        </div>
+        <div class="aisi-body">
+          <svg id="aisiGauge" class="aisi-gauge" viewBox="0 0 220 150"></svg>
+          <div class="aisi-reading">
+            <span class="aisi-value" id="aisiValue">—</span>
+            <span class="aisi-cat" id="aisiCategory">—</span>
+          </div>
+        </div>
+        <canvas id="aisiSpark"></canvas>
+        <div class="grap-badge" id="grapBadge">—</div>
+      </section>
+
+      <!-- Station list -->
+      <section class="card glass station-card">
+        <div class="card-head">
+          <h2>Stations</h2>
+          <span class="pill" id="stationCount">0 online</span>
+        </div>
+        <div class="station-search-wrap">
+          <input id="stationSearch" class="station-search" type="text"
+                 placeholder="Search stations…" autocomplete="off">
+        </div>
+        <div class="station-list" id="stationList"></div>
+      </section>
+
+      <!-- Forecast chart -->
+      <section class="card glass" id="forecastCard">
+        <div class="card-head">
+          <h2>72h Forecast</h2>
+          <div class="pollutant-tabs" id="pollutantTabs">
+            <button data-p="pm25" class="active">PM2.5</button>
+            <button data-p="pm10">PM10</button>
+            <button data-p="aqi">NAQI</button>
+          </div>
+          <button class="mini-btn" id="btnCsv" title="Download this forecast as CSV">CSV</button>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="forecastChart"></canvas>
+        </div>
+        <div class="forecast-model-notes" id="modelNotes">—</div>
+      </section>
+
+      <!-- Alerts -->
+      <section class="card glass" id="alertsCard">
+        <div class="card-head">
+          <h2>Health Advisories</h2>
+          <div class="lang-toggle" id="langToggle">
+            <button data-lang="en" class="active">EN</button>
+            <button data-lang="hi">हिं</button>
+          </div>
+          <span class="live-dot"></span>
+        </div>
+        <div id="alertList" class="alert-list"></div>
+      </section>
+    </aside>
+
+    <!-- ── Bottom ticker ── -->
+    <div class="ticker-bar glass">
+      <div class="ticker-label">ADVISORY</div>
+      <div class="ticker-track" id="tickerTrack"></div>
+      <div class="ticker-meta" id="tickerMeta"></div>
+    </div>
+  </main>
+
+  <!-- Toast / pulse container -->
+  <div id="pulseLayer" class="pulse-layer"></div>
+
+  <!-- ═══════════════════ Scripts ═══════════════════ -->
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+  <script src="js/utils.js"></script>
+  <script src="js/websocket.js"></script>
+  <script src="js/aisi.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/plume.js"></script>
+  <script src="js/alerts.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

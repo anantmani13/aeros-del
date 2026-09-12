@@ -1,0 +1,485 @@
+"""
+OpenAQ Data Client — PRIMARY Air Quality Data Source
+
+Fetches hourly PM2.5, PM10, NO2, SO2, O3, CO for ~40 Delhi NCR stations
+from the OpenAQ v3 API. Includes rate limiting, retry logic, caching,
+historical data retrieval, and validation against physical bounds.
+"""
+
+import asyncio
+import time
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
+
+# ── Physical bounds for validation ───────────────────────────────────
+POLLUTANT_BOUNDS = {
+    "pm25": (0, 1500),     # µg/m³
+    "pm10": (0, 2000),     # µg/m³
+    "no2": (0, 800),       # µg/m³
+    "so2": (0, 1000),      # µg/m³
+    "o3": (0, 600),        # µg/m³
+    "co": (0, 50),         # mg/m³
+}
+
+# Map OpenAQ parameter names to our internal names
+OPENAQ_PARAM_MAP = {
+    "pm25": "pm25",
+    "pm10": "pm10",
+    "no2": "no2",
+    "so2": "so2",
+    "o3": "o3",
+    "co": "co",
+}
+
+
+@dataclass
+class StationReading:
+    """Represents a single station's pollutant readings at a point in time."""
+
+    station_id: str
+    station_name: str
+    latitude: float
+    longitude: float
+    timestamp: str
+    pollutants: Dict[str, Optional[float]]
+    source: str = "openaq"
+
+
+class OpenAQClient:
+    """
+    Async client for OpenAQ API v3.
+
+    Features:
+    - Rate-limited requests (configurable, default 0.1s between calls)
+    - Automatic retry with exponential backoff
+    - In-memory cache for recent readings
+    - Bounding box queries for Delhi NCR
+    - Historical data retrieval for model training
+    - Physical bounds validation
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: str = "https://api.openaq.org/v3",
+        rate_limit: float = 0.1,
+        cache_ttl: int = 300,
+        max_concurrency: int = 4,
+    ):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.rate_limit = rate_limit
+        self.cache_ttl = cache_ttl
+        self.max_concurrency = max(1, max_concurrency)
+        self._last_request_time = 0.0
+        self._cache: Dict[str, Any] = {}
+        self._cache_timestamps: Dict[str, float] = {}
+        self._sensor_param_map: Dict[int, str] = {}
+        self._pace_lock: Optional[asyncio.Lock] = None
+        self._http_client = None
+
+        # Delhi NCR bounding box
+        self.bbox = {
+            "lat_min": 28.30,
+            "lat_max": 28.90,
+            "lon_min": 76.80,
+            "lon_max": 77.50,
+        }
+
+    async def _get_http_client(self):
+        """Lazy-initialize the HTTP client."""
+        if self._http_client is None:
+            try:
+                import httpx
+                headers = {"Accept": "application/json"}
+                if self.api_key:
+                    headers["X-API-Key"] = self.api_key
+                self._http_client = httpx.AsyncClient(
+                    headers=headers,
+                    timeout=30.0,
+                )
+            except ImportError:
+                import aiohttp
+                self._http_client = "aiohttp"
+        return self._http_client
+
+    async def _rate_limited_request(
+        self,
+        endpoint: str,
+        params: Optional[Dict] = None,
+        max_retries: int = 3,
+    ) -> Optional[Dict]:
+        """Make a rate-limited API request with retry logic."""
+        # Rate limiting
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self.rate_limit:
+            await asyncio.sleep(self.rate_limit - elapsed)
+
+        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+
+        for attempt in range(max_retries):
+            try:
+                self._last_request_time = time.time()
+                client = await self._get_http_client()
+
+                if isinstance(client, str):
+                    # aiohttp fallback
+                    import aiohttp
+                    headers = {"Accept": "application/json"}
+                    if self.api_key:
+                        headers["X-API-Key"] = self.api_key
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+                        ) as resp:
+                            if resp.status == 200:
+                                return await resp.json()
+                            elif resp.status == 429:
+                                wait = 2 ** (attempt + 1)
+                                logger.warning(f"Rate limited, waiting {wait}s")
+                                await asyncio.sleep(wait)
+                                continue
+                            else:
+                                logger.warning(
+                                    f"OpenAQ API error {resp.status}: {await resp.text()}"
+                                )
+                else:
+                    response = await client.get(url, params=params)
+                    if response.status_code == 200:
+                        return response.json()
+                    elif response.status_code == 429:
+                        wait = 2 ** (attempt + 1)
+                        logger.warning(f"Rate limited, waiting {wait}s")
+                        await asyncio.sleep(wait)
+                        continue
+                    else:
+                        logger.warning(
+                            f"OpenAQ API error {response.status_code}: {response.text}"
+                        )
+
+            except Exception as e:
+                logger.error(f"Request failed (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+
+        return None
+
+    def _validate_value(self, param: str, value: float) -> bool:
+        """Validate a pollutant value against physical bounds."""
+        bounds = POLLUTANT_BOUNDS.get(param)
+        if bounds is None:
+            return True
+        return bounds[0] <= value <= bounds[1]
+
+    def _get_cached(self, key: str) -> Optional[Any]:
+        """Get a value from cache if still valid."""
+        if key in self._cache:
+            age = time.time() - self._cache_timestamps.get(key, 0)
+            if age < self.cache_ttl:
+                return self._cache[key]
+            else:
+                del self._cache[key]
+                del self._cache_timestamps[key]
+        return None
+
+    def _set_cached(self, key: str, value: Any):
+        """Store a value in cache."""
+        self._cache[key] = value
+        self._cache_timestamps[key] = time.time()
+
+    async def get_locations_in_delhi(self) -> List[Dict]:
+        """
+        Fetch all monitoring locations in Delhi NCR bounding box.
+
+        Returns:
+            List of location dicts with id, name, coordinates, parameters
+        """
+        cache_key = "locations_delhi"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        params = {
+            "bbox": (f"{self.bbox['lon_min']},{self.bbox['lat_min']},"
+                     f"{self.bbox['lon_max']},{self.bbox['lat_max']}"),
+            "limit": 100,
+            "page": 1,
+            "order_by": "id",
+            "sort_order": "asc",
+        }
+
+        # Try bounding box first, fall back to coordinates + radius
+        data = await self._rate_limited_request("locations", params)
+
+        if not data or "results" not in data:
+            # Fallback: query by coordinates center + radius (max 25km)
+            params = {
+                "coordinates": "28.6139,77.2090",
+                "radius": 25000,
+                "limit": 100,
+                "page": 1,
+            }
+            data = await self._rate_limited_request("locations", params)
+
+        locations = []
+        if data and "results" in data:
+            for loc in data["results"]:
+                # Record sensor -> parameter mapping (v3 /latest only returns
+                # sensorsId, so we resolve pollutant names via this map).
+                # Also derive the monitored-parameters set from sensors —
+                # the top-level "parameters" field is often empty.
+                params = set()
+                for s in loc.get("sensors") or []:
+                    param = s.get("parameter")
+                    if isinstance(param, dict):
+                        pname = param.get("name", "").lower()
+                        self._sensor_param_map[s.get("id")] = pname
+                        params.add(pname)
+                locations.append({
+                    "id": loc.get("id"),
+                    "name": loc.get("name", "Unknown"),
+                    "latitude": loc.get("coordinates", {}).get("latitude"),
+                    "longitude": loc.get("coordinates", {}).get("longitude"),
+                    "parameters": sorted(params),
+                    "last_updated": (loc.get("datetimeLast") or {}).get("utc")
+                        if isinstance(loc.get("datetimeLast"), dict)
+                        else loc.get("datetimeLast"),
+                })
+
+            self._set_cached(cache_key, locations)
+
+        logger.info(f"Found {len(locations)} OpenAQ locations in Delhi NCR")
+        return locations
+
+    async def get_latest_measurements(
+        self,
+        location_id: Optional[int] = None,
+    ) -> List[StationReading]:
+        """
+        Fetch latest measurements for Delhi NCR stations.
+
+        Args:
+            location_id: Specific location ID, or None for all Delhi NCR
+
+        Returns:
+            List of StationReading objects
+        """
+        if location_id:
+            cache_key = f"latest_{location_id}"
+            cached = self._get_cached(cache_key)
+            if cached:
+                return cached
+
+            data = await self._rate_limited_request(
+                f"locations/{location_id}/latest"
+            )
+            readings = self._parse_latest_response(data)
+            self._set_cached(cache_key, readings)
+            return readings
+
+        # Fetch all Delhi NCR
+        cache_key = "latest_all_delhi"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        locations = await self.get_locations_in_delhi()
+
+        # Only locations that actually measure PM — limits API calls and
+        # skips stations without the pollutants we model.
+        locations = [
+            loc for loc in locations
+            if any(p in ("pm25", "pm10") for p in (loc.get("parameters") or []))
+        ][:50]
+
+        all_readings = []
+
+        # Parallel fetch with bounded concurrency: dispatch pacing is
+        # serialized under a lock so bursts stay inside OpenAQ's quota,
+        # while in-flight requests overlap (startup 60-90s → ~10-20s).
+        if self._pace_lock is None:
+            self._pace_lock = asyncio.Lock()
+        sem = asyncio.Semaphore(self.max_concurrency)
+
+        async def _fetch_one(loc: Dict) -> List[StationReading]:
+            async with sem:
+                async with self._pace_lock:
+                    elapsed = time.time() - self._last_request_time
+                    spacing = max(self.rate_limit, 0.35)
+                    if elapsed < spacing:
+                        await asyncio.sleep(spacing - elapsed)
+                    self._last_request_time = time.time()
+                loc_data = await self._rate_limited_request(
+                    f"locations/{loc['id']}/latest"
+                )
+                if loc_data:
+                    return self._parse_latest_response(loc_data, loc)
+                return []
+
+        for readings in await asyncio.gather(
+            *(_fetch_one(loc) for loc in locations)
+        ):
+            all_readings.extend(readings)
+
+        self._set_cached(cache_key, all_readings)
+        return all_readings
+
+    def _parse_latest_response(
+        self,
+        data: Optional[Dict],
+        location_info: Optional[Dict] = None,
+    ) -> List[StationReading]:
+        """Parse OpenAQ latest measurements response into StationReadings."""
+        if not data or "results" not in data:
+            return []
+
+        readings = []
+        results = data["results"]
+
+        # Group by location
+        for result in results:
+            pollutants = {}
+            timestamp = None
+
+            measurements = result.get("measurements", [])
+            if isinstance(result, dict) and "parameter" in result:
+                measurements = [result]
+            elif not measurements and "value" in result:
+                # v3 /latest returns each measurement as a bare dict
+                # (sensorsId + value + datetime, parameter resolved via map).
+                measurements = [result]
+
+            for m in measurements:
+                param_name = m.get("parameter", {})
+                if isinstance(param_name, dict):
+                    param_name = param_name.get("name", "").lower()
+                else:
+                    param_name = str(param_name).lower()
+
+                # v3 /latest omits the parameter name; resolve it via the
+                # sensor->parameter map built when locations were listed.
+                if (not param_name or param_name == "none") and m.get("sensorsId"):
+                    param_name = (self._sensor_param_map
+                                  .get(m.get("sensorsId"), "") or "").lower()
+
+                internal_name = OPENAQ_PARAM_MAP.get(param_name)
+                if internal_name and m.get("value") is not None:
+                    value = float(m["value"])
+                    if self._validate_value(internal_name, value):
+                        pollutants[internal_name] = value
+
+                if not timestamp and m.get("datetime"):
+                    dt = m["datetime"]
+                    if isinstance(dt, dict):
+                        timestamp = dt.get("utc") or dt.get("local")
+                    else:
+                        timestamp = str(dt)
+
+            if pollutants:
+                loc = location_info or {}
+                coords = result.get("coordinates", {})
+
+                # Drop clearly-stale archive sensors (>= 2019 CPCB heritage)
+                stamp = None
+                if timestamp:
+                    try:
+                        stamp = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+                        if stamp < cutoff:
+                            continue
+                    except (ValueError, TypeError):
+                        stamp = None
+
+                readings.append(StationReading(
+                    station_id=str(
+                        loc.get("id") or result.get("id") or "unknown"
+                    ),
+                    station_name=loc.get("name")
+                        or result.get("name", "Unknown"),
+                    latitude=coords.get("latitude")
+                        or loc.get("latitude", 0.0),
+                    longitude=coords.get("longitude")
+                        or loc.get("longitude", 0.0),
+                    timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
+                    pollutants=pollutants,
+                    source="openaq",
+                ))
+
+        return readings
+
+    async def get_historical_measurements(
+        self,
+        location_id: int,
+        date_from: str,
+        date_to: str,
+        parameter: str = "pm25",
+        limit: int = 1000,
+    ) -> List[Dict]:
+        """
+        Fetch historical measurements for model training.
+
+        Args:
+            location_id: OpenAQ location ID
+            date_from: Start date (ISO format)
+            date_to: End date (ISO format)
+            parameter: Pollutant parameter name
+            limit: Max results per page
+
+        Returns:
+            List of measurement dicts with datetime and value
+        """
+        all_measurements = []
+        page = 1
+
+        while True:
+            params = {
+                "date_from": date_from,
+                "date_to": date_to,
+                "limit": limit,
+                "page": page,
+                "sort_order": "asc",
+            }
+
+            data = await self._rate_limited_request(
+                f"locations/{location_id}/measurements", params
+            )
+
+            if not data or "results" not in data:
+                break
+
+            results = data["results"]
+            if not results:
+                break
+
+            for m in results:
+                value = m.get("value")
+                if value is not None and self._validate_value(parameter, float(value)):
+                    all_measurements.append({
+                        "datetime": m.get("date", {}).get("utc")
+                            or m.get("datetime"),
+                        "value": float(value),
+                        "parameter": parameter,
+                    })
+
+            # Check if there are more pages
+            if len(results) < limit:
+                break
+            page += 1
+
+        logger.info(
+            f"Retrieved {len(all_measurements)} historical measurements "
+            f"for location {location_id}"
+        )
+        return all_measurements
+
+    async def close(self):
+        """Close the HTTP client."""
+        if self._http_client and not isinstance(self._http_client, str):
+            await self._http_client.aclose()
+            self._http_client = None

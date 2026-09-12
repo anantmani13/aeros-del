@@ -1,0 +1,26 @@
+# Render Blueprint — one-click deploy of AEROS · DEL
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: aeros-del
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: DEMO_MODE
+        value: "false"
+      - key: DATA_REFRESH_INTERVAL
+        value: "300"
+      - key: LLM_ENHANCED
+        value: "false"
+      - key: OPENAQ_API_KEY
+        sync: false
+      - key: NASA_FIRMS_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MAPTILER_KEY
+        sync: false
