@@ -37,13 +37,19 @@ FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init service, initial refresh, background push loop."""
+    """Startup: init service fast, initial refresh in background."""
     app.state.service = AQIService(settings)
     app.state.ws_manager = WebSocketManager()
 
-    # ── Initial full pipeline run ──────────────────────────────────
-    logger.info("Performing initial pipeline refresh ...")
-    await app.state.service.initialize()
+    # ── Background initial refresh (non-blocking so Render port opens) ──
+    async def _initial_refresh():
+        try:
+            logger.info("Performing initial pipeline refresh ...")
+            await app.state.service.initialize()
+        except Exception as e:
+            logger.error("Initial refresh failed: %s", e)
+
+    app.state.init_task = asyncio.create_task(_initial_refresh())
     await app.state.ws_manager.start_heartbeat(interval_seconds=30)
 
     # ── Background refresh + broadcast loop ────────────────────────
@@ -74,6 +80,10 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ───────────────────────────────────────────────────
     app.state.publish_task.cancel()
+    try:
+        app.state.init_task.cancel()
+    except Exception:
+        pass
     await app.state.ws_manager.stop_heartbeat()
     await app.state.service.close()
     logger.info("SIH AQI system shut down")

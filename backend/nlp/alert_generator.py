@@ -311,16 +311,17 @@ class AlertGenerator:
 
     async def _gemini_complete(self, prompt: str) -> Optional[str]:
         # New SDK first (google-genai), legacy SDK as fallback.
+        # 25s cap so Render startup never hangs on LLM.
         try:
             from google import genai as new_genai  # type: ignore
             client = new_genai.Client(api_key=self.gemini_api_key)
             for model_name in self.GEMINI_MODELS:
                 try:
-                    resp = await asyncio.to_thread(
+                    resp = await asyncio.wait_for(asyncio.to_thread(
                         client.models.generate_content,
                         model=model_name,
                         contents=prompt,
-                    )
+                    ), timeout=25)
                     text = getattr(resp, "text", "") or ""
                     if text.strip():
                         return text.strip()

@@ -7,15 +7,15 @@ services:
     plan: free
     healthCheckPath: /api/v1/health
     autoDeploy: true
+    # NOTE: Do NOT set PORT here — Render injects $PORT (default 10000)
+    # run.py already reads env PORT, so it binds correctly.
     envVars:
-      - key: PORT
-        value: 8000
       - key: DEMO_MODE
         value: "false"
       - key: DATA_REFRESH_INTERVAL
         value: "300"
       - key: LLM_ENHANCED
-        value: "false"
+        value: "true"
       - key: OPENAQ_API_KEY
         sync: false
       - key: NASA_FIRMS_API_KEY
@@ -23,4 +23,6 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: MAPTILER_KEY
+        sync: false
+      - key: OPENWEATHER_API_KEY
         sync: false
