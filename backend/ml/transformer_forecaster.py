@@ -90,10 +90,16 @@ class TFTForecaster:
             loss_fn = nn.MSELoss()
 
             model.train()
-            X = torch.tensor(np_.array([s["history"] for s in sequences]),
-                             dtype=torch.float32)
-            y = torch.tensor(np_.array([s["targets"] for s in sequences]),
-                             dtype=torch.float32).unsqueeze(-1)
+            # Fixed PM_SCALE on concentrations only (cyclical hour
+            # features stay ±1): raw µg/m³ next to sin/cos saturates the
+            # embedding and training collapses to a constant.
+            Harr = np_.array([s["history"] for s in sequences],
+                             dtype=float)
+            Harr[:, :, :2] /= self.PM_SCALE
+            X = torch.tensor(Harr, dtype=torch.float32)
+            y = (torch.tensor(np_.array([s["targets"] for s in sequences]),
+                              dtype=torch.float32).unsqueeze(-1)
+                 / self.PM_SCALE)
 
             for _ in range(12):
                 # Plain wrapper class (not nn.Module) — no __call__.
@@ -137,7 +143,8 @@ class TFTForecaster:
         ratio = float(context.get("pm10_ratio", 0.0) or 0.0) or 1.35
 
         if self._model is not None and len(history) >= self.history_window:
-            predicted = self._torch_predict(history, current, horizon)
+            rows = self._history_rows(history, ratio)
+            predicted = self._torch_predict_5d(rows, horizon)
         else:
             predicted = self._attention_baseline(history, current)
 
@@ -201,23 +208,46 @@ class TFTForecaster:
 
         return out
 
-    def _torch_predict(
-        self,
-        history: List[float],
-        current: float,
-        horizon: int,
-    ) -> List[float]:
-        """Run the trained torch model, falling back on failure."""
+    # Fixed input scale shared by training (scripts/train_models) and
+    # inference. Raw µg/m³ (0-500) next to sin/cos (±1) saturates the
+    # embedding and the net collapses to a constant (r≈0.07, verified).
+    PM_SCALE = 300.0
+
+    @staticmethod
+    def _history_rows(history: List[float], pm10_ratio: float) -> List[List[float]]:
+        """Rebuild the 5 training features for a univariate PM2.5 history.
+
+        Hours are counted back from now (live inference has no stored
+        per-point timestamps); PM10 is approximated from the observed
+        station ratio. Same column order the trainer uses.
+        """
+        n = len(history)
+        rows = []
+        for i, v in enumerate(history):
+            hr = (datetime.now().hour - (n - 1 - i)) % 24
+            rows.append([
+                float(v), float(v) * pm10_ratio,
+                math.sin(2 * math.pi * hr / 24),
+                math.cos(2 * math.pi * hr / 24),
+                1.0 if (hr >= 19 or hr < 7) else 0.0,
+            ])
+        return rows
+
+    def _torch_predict_5d(self, rows, horizon: int = 72) -> List[float]:
+        """Run the trained net on a (W,5) raw-scale feature window."""
         np_ = _ensure_numpy()
         try:
-            window = np_.array(history[-self.history_window:], dtype=float)
-            # Build a mock multi-variate input of the trained dim
-            X = np_.tile(window, (1, _TFTEncoderDecoder.INPUT_DIM_DEFAULT, 1)).T[
-                :, :_TFTEncoderDecoder.INPUT_DIM_DEFAULT
-            ]
-            X_t = self._torch.tensor(X[np_.newaxis, :, :], dtype=self._torch.float32)
+            window = np_.array(rows[-self.history_window:], dtype=float)
+            if window.shape[1] != _TFTEncoderDecoder.INPUT_DIM_DEFAULT:
+                raise ValueError(f"expected 5 features, got {window.shape}")
+            window = window.copy()
+            window[:, :2] /= self.PM_SCALE  # concentrations only
+            X_t = self._torch.tensor(window[np_.newaxis, :, :],
+                                     dtype=self._torch.float32)
             with self._torch.no_grad():
-                pred = self._model(X_t).squeeze().numpy()
+                # Plain wrapper class (not nn.Module) — no __call__.
+                pred = (self._model.forward(X_t).squeeze().numpy()
+                        * self.PM_SCALE)
             pred = np_.ravel(pred)
             if len(pred) < horizon:
                 pred = np_.pad(pred, (0, horizon - len(pred)),
@@ -325,12 +355,14 @@ class _TFTEncoderDecoder:
         # embedding parameters, so attention/LSTM/head silently never
         # learned (a real bug on the DL training path).
         import itertools
-        return itertools.chain(
+        # Materialized list: some optimizers single-pass the iterable,
+        # which would silently train only the first epoch.
+        return list(itertools.chain(
             self.embed.parameters(),
             self.attention.parameters(),
             self.decoder.parameters(),
             self.head.parameters(),
-        )
+        ))
 
     def state_dict(self):
         return {

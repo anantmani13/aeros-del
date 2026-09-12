@@ -1,33 +1,34 @@
 {
   "db": "C:\\Users\\Anant\\Desktop\\All Projects Btech\\SIH\\data\\aqi_data.db",
-  "gbm_backend": "sklearn-histgbm",
-  "xgboost_available": false,
-  "generated_at": "2026-09-12T07:15:43.993832+00:00",
+  "gbm_backend": "lightgbm",
+  "xgboost_available": true,
+  "generated_at": "2026-09-12T08:29:31.530265+00:00",
   "stations": 54,
-  "readings": 16976,
+  "readings": 17030,
   "hourly_continuity": {
-    "consecutive_pairs": 16922,
+    "consecutive_pairs": 16976,
     "hourly_pairs": 16607,
-    "fraction": 0.981,
-    "span_days": 29
+    "fraction": 0.978,
+    "span_days": 30
   },
   "tft_sequences": 476,
   "tft": {
     "trained": true,
     "backend": "torch",
-    "h24_mae": 18.73,
-    "h24_rmse": 27.67,
+    "train_loss_mse": 0.0043,
+    "h24_mae": 25.55,
+    "h24_rmse": 28.63,
     "persist_h24_mae": 16.14,
-    "pearson_r_h24": 0.067,
+    "pearson_r_h24": 0.052,
     "train_n": 380,
     "test_n": 96,
     "saved": false,
-    "verdict": "NOT saved \u2014 H+24 MAE 18.73 vs persist 16.14, r=0.067"
+    "verdict": "NOT saved \u2014 H+24 MAE 25.55 vs persist 16.14, r=0.052"
   },
-  "samples": 16536,
+  "samples": 16565,
   "fires": {
     "hotspots": 79,
-    "sample_coverage": 0.233
+    "sample_coverage": 0.234
   },
   "weather": {
     "coverage": 1.0,
@@ -35,24 +36,27 @@
     "cache": "data/weather_history.json"
   },
   "holdout": {
-    "train_n": 13228,
-    "test_n": 3308,
+    "train_n": 13252,
+    "test_n": 3313,
     "persistence": {
-      "mae": 8.64,
-      "rmse": 14.89
+      "mae": 8.71,
+      "rmse": 14.95
     }
   },
   "lgbm": {
     "trained": true,
-    "backend": "sklearn",
-    "model_mae": 11.06,
-    "model_rmse": 17.15,
-    "pearson_r": 0.692,
+    "backend": "lightgbm",
+    "model_mae": 11.31,
+    "model_rmse": 17.99,
+    "pearson_r": 0.662,
     "saved": false
   },
   "xgboost": {
-    "trained": false,
-    "reason": "xgboost not installed locally",
+    "trained": true,
+    "backend": null,
+    "model_mae": 13.54,
+    "model_rmse": 31.86,
+    "pearson_r": 0.34,
     "saved": false
   },
   "verdict": "Models trained but did not beat persistence on the holdout \u2014 nothing saved. More history needed."

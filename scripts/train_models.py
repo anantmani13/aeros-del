@@ -130,8 +130,8 @@ def build_tft_sequences(series, window=TFT_WINDOW, horizon=TFT_HORIZON):
 
     5 features per hour (must match _TFTEncoderDecoder.INPUT_DIM_DEFAULT,
     which load() rebuilds): [pm25, pm10, hour_sin, hour_cos, is_night].
-    Raw concentration scale (no normalization) to match _torch_predict,
-    which tiles raw history at inference time.
+    Raw µg/m³ scale — train() and _torch_predict_5d apply the fixed
+    PM_SCALE internally on both sides, so train/serve always match.
     """
     import math
     seqs = []
@@ -201,10 +201,9 @@ async def train_tft_gated(seqs, test_cap=250):
         return {**rep, "saved": False}
     errs, perrs, preds24, acts24 = [], [], [], []
     for s in te:
-        hist = [float(v) for v in s["history"][:, 0]]
-        cur = hist[-1]
+        cur = float(s["history"][-1, 0])
         try:
-            out = fc._torch_predict(hist, cur, TFT_HORIZON)
+            out = fc._torch_predict_5d(s["history"], TFT_HORIZON)
         except Exception:
             continue
         actual = float(s["targets"][23])
@@ -217,6 +216,7 @@ async def train_tft_gated(seqs, test_cap=250):
     m, p = stats(errs), stats(perrs)
     r = round(pearson(preds24, acts24), 3)
     out = {"trained": True, "backend": "torch",
+           "train_loss_mse": rep.get("loss"),
            "h24_mae": m["mae"], "h24_rmse": m["rmse"],
            "persist_h24_mae": p["mae"], "pearson_r_h24": r,
            "train_n": len(tr), "test_n": len(te), "saved": False}
