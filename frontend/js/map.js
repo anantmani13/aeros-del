@@ -36,6 +36,18 @@
     return BASE_STYLES[style].tiles;
   }
 
+  // Esri splits its dark map in two: the gray canvas (no labels) plus a
+  // reference overlay carrying boundaries + city labels. CARTO dark_all
+  // already has labels baked in, so the overlay is only needed for the
+  // keyless dark style.
+  const ESRI_DARK_REF_TILES = [
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+  ];
+
+  function needsDarkLabels(style, usingKeyTiles) {
+    return style === 'dark' && !usingKeyTiles;
+  }
+
   // Tone ONLY the basemap raster. Vector overlays (stations, labels, ring,
   // plumes) are separate layers, so they stay full-bright while the pale
   // light tiles get dimmed a touch (~10%) to let overlays pop.
@@ -99,6 +111,7 @@
       this._maptilerKey = maptilerKey || null;
       this._cartoKey = cartoKey || null;
       this._usingKeyTiles = false;
+      this._showLabels = false;
       // Only honor a CARTO key — it restores the old CARTO look. MapTiler
       // is deliberately NOT auto-used: a stale/invalid MAPTILER_KEY in .env
       // would otherwise keep the map broken in dark mode.
@@ -108,30 +121,43 @@
         maxzoom = 22;
         this._usingKeyTiles = true;
       }
+      this._showLabels = needsDarkLabels(this.baseStyle, this._usingKeyTiles);
       this._fallbackDone = false;
       // Debug hook: open DevTools console and run
       //   window.__aerosBaseTiles
       // to see exactly which tile host the map is using.
       try { window.__aerosBaseTiles = tiles.slice(); } catch (e) { /* ignore */ }
+      const styleSources = {
+        base: {
+          type: 'raster',
+          tiles: tiles,
+          tileSize: 256,
+          maxzoom: maxzoom,
+          attribution: attribution,
+        },
+      };
+      const styleLayers = [{
+        id: 'base',
+        type: 'raster',
+        source: 'base',
+        paint: basePaint(this.baseStyle),
+      }];
+      if (this._showLabels) {
+        styleSources['base-labels'] = {
+          type: 'raster',
+          tiles: ESRI_DARK_REF_TILES,
+          tileSize: 256,
+          maxzoom: 19,
+          attribution: BASE_STYLES.dark.attr,
+        };
+        styleLayers.push({ id: 'base-labels', type: 'raster', source: 'base-labels' });
+      }
       this.map = new maplibregl.Map({
         container: this.container,
         style: {
           version: 8,
-          sources: {
-            base: {
-              type: 'raster',
-              tiles: tiles,
-              tileSize: 256,
-              maxzoom: maxzoom,
-              attribution: attribution,
-            },
-          },
-          layers: [{
-            id: 'base',
-            type: 'raster',
-            source: 'base',
-            paint: basePaint(this.baseStyle),
-          }],
+          sources: styleSources,
+          layers: styleLayers,
         },
         center: DELHI_CENTER,
         zoom: 8.2,
@@ -152,17 +178,12 @@
             this._fallbackDone = true;
             this._usingKeyTiles = false;
             try {
-              if (this.map.getLayer('base')) this.map.removeLayer('base');
-              if (this.map.getSource('base')) this.map.removeSource('base');
-              this.map.addSource('base', {
-                type: 'raster',
-                tiles: keylessTiles(this.baseStyle),
-                tileSize: 256,
-                maxzoom: BASE_STYLES[this.baseStyle].maxzoom || 22,
-                attribution: BASE_STYLES[this.baseStyle].attr,
-              });
-              const before = this.map.getLayer('pm25-heat') ? 'pm25-heat' : undefined;
-              this.map.addLayer({ id: 'base', type: 'raster', source: 'base', paint: basePaint(this.baseStyle) }, before);
+              this._addBaseLayers(
+                keylessTiles(this.baseStyle),
+                BASE_STYLES[this.baseStyle].attr,
+                BASE_STYLES[this.baseStyle].maxzoom || 22,
+                this.baseStyle,
+              );
               try { window.__aerosBaseTiles = keylessTiles(this.baseStyle).slice(); } catch (err) { /* ignore */ }
             } catch (err) { /* ignore */ }
           }
@@ -194,14 +215,9 @@
         this._usingKeyTiles = true;
       }
       try { window.__aerosBaseTiles = tiles.slice(); } catch (e) { /* ignore */ }
-      // Re-add raster at the bottom (before the heat layer when present).
-      if (this.map.getLayer('base')) this.map.removeLayer('base');
-      if (this.map.getSource('base')) this.map.removeSource('base');
-      this.map.addSource('base', {
-        type: 'raster', tiles: tiles, tileSize: 256, maxzoom: maxzoom, attribution: attribution,
-      });
-      const before = this.map.getLayer('pm25-heat') ? 'pm25-heat' : undefined;
-      this.map.addLayer({ id: 'base', type: 'raster', source: 'base', paint: basePaint(name) }, before);
+      // Re-add raster at the bottom (before the heat layer when present),
+      // plus the city-labels overlay when the dark style needs it.
+      this._addBaseLayers(tiles, attribution, maxzoom, name);
       // Keep place labels legible on either basemap — stronger halo on
       // light so names stay crisp over the (dimmed) tiles.
       if (this.map.getLayer('station-labels')) {
@@ -217,6 +233,32 @@
         const rp = ringPaint(name);
         this.map.setPaintProperty('delhi-ring', 'line-color', rp['line-color']);
         this.map.setPaintProperty('delhi-ring', 'line-width', rp['line-width']);
+      }
+    }
+
+    // (Re)builds the basemap raster at the bottom of the stack, with the
+    // Esri city-labels overlay on top of it when the dark style needs one.
+    _addBaseLayers(tiles, attribution, maxzoom, styleName) {
+      if (this.map.getLayer('base-labels')) this.map.removeLayer('base-labels');
+      if (this.map.getSource('base-labels')) this.map.removeSource('base-labels');
+      if (this.map.getLayer('base')) this.map.removeLayer('base');
+      if (this.map.getSource('base')) this.map.removeSource('base');
+      this.map.addSource('base', {
+        type: 'raster', tiles: tiles, tileSize: 256, maxzoom: maxzoom, attribution: attribution,
+      });
+      const before = this.map.getLayer('pm25-heat') ? 'pm25-heat' : undefined;
+      this.map.addLayer({ id: 'base', type: 'raster', source: 'base', paint: basePaint(styleName) }, before);
+      this._showLabels = needsDarkLabels(styleName, this._usingKeyTiles);
+      if (this._showLabels) {
+        this.map.addSource('base-labels', {
+          type: 'raster',
+          tiles: ESRI_DARK_REF_TILES,
+          tileSize: 256,
+          maxzoom: 19,
+          attribution: BASE_STYLES.dark.attr,
+        });
+        const above = this.map.getLayer('pm25-heat') ? 'pm25-heat' : undefined;
+        this.map.addLayer({ id: 'base-labels', type: 'raster', source: 'base-labels' }, above);
       }
     }
 
