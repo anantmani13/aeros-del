@@ -174,9 +174,19 @@ async def main():
         provider="AirGradient")
     m_fresh = svc._match_readings([stale_official, fresh_private],
                                   fresh_within_h=6)
-    ok &= check("fresh beats anchored-stale",
-                m_fresh.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 45.0,
+    ok &= check("private sensors never contribute (even fresh+close)",
+                m_fresh.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 120.0,
                 f"got {m_fresh.get('t-rkp', {}).get('pollutants')}")
+    fresh_reference = StationReading(
+        station_id="8118", station_name="New Delhi",
+        latitude=28.5900, longitude=77.2100, timestamp=new_ts,  # ~3.7 km
+        pollutants={"pm25": 45.0, "pm10": 80.0}, source="openaq",
+        provider="AirNow")
+    m_freshref = svc._match_readings([stale_official, fresh_reference],
+                                     fresh_within_h=6)
+    ok &= check("fresh reference beats anchored-stale",
+                m_freshref.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 45.0,
+                f"got {m_freshref.get('t-rkp', {}).get('pollutants')}")
     m_legacy = svc._match_readings([stale_official, fresh_private])
     ok &= check("legacy path keeps anchor behavior",
                 m_legacy.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 120.0,

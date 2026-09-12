@@ -837,14 +837,14 @@ class AQIService:
         return out
 
     # Providers operating calibrated outdoor monitors (government
-    # networks + research-grade fleets). Everything else is treated as a
-    # private low-cost sensor: usable only when fresh, sane and close.
+    # networks + research-grade fleets). Private low-cost / apartment
+    # sensors NEVER contribute station data — they are filtered out before
+    # matching (project policy: no apartment-type sensors in the feed).
     REFERENCE_PROVIDERS = frozenset({
         "cpcb", "dpcc", "imd", "iitm", "safar",
         "hspcb", "uppcb", "mhua", "airnow", "clarity",
     })
     FRESH_REF_RADIUS_KM = 10.0
-    FRESH_PRIVATE_RADIUS_KM = 5.0
     STALE_REF_RADIUS_KM = 25.0
     # Outdoor plausibility floor: Delhi ambient PM2.5 essentially never
     # drops below ~5 µg/m³ even in clean monsoon spells — below that the
@@ -882,29 +882,33 @@ class AQIService:
                         ) -> Dict[str, Dict]:
         """Map OpenAQ readings to station metadata.
 
-        Tiered pools (first match wins per station):
+        Reference-network pools only — private apartment-type sensors are
+        excluded outright and can never contribute (project policy).
 
         1. Fresh reference monitors (govt / calibrated fleets, ≤10 km) —
            correctly-named anchor still preferred inside the pool.
-        2. Fresh private sensors, but only sane ones within 5 km (an
-           apartment sensor must never paint half the city).
-        3. Stale reference monitors within 25 km (flagged stale
+        2. Stale reference monitors within 25 km (flagged stale
            downstream; the CAMS fallback usually replaces these first).
-        Stale private readings are discarded outright.
 
-        Without tiers, a correctly-named but day-old official monitor
-        beats a nearby live sensor on anchor alone — or one fresh
-        apartment sensor smears AQI 5.7 across 8 stations.
+        Stations with no reference monitor nearby stay unmatched here and
+        are covered by the CAMS nowcast fallback.
         """
         if not readings:
             return {}
+        ref = [r for r in readings
+               if self._is_reference_source(
+                   getattr(r, "provider", "unknown"),
+                   getattr(r, "station_name", ""))]
+        if not ref:
+            return {}
         if fresh_within_h is not None:
             fresh_ids = {
-                id(r) for r in readings
+                id(r) for r in ref
                 if (self._reading_age_hours(getattr(r, "timestamp", None))
                     or float("inf")) <= fresh_within_h
             }
-            fresh = [r for r in readings if id(r) in fresh_ids]
+            fresh = [r for r in ref
+                     if id(r) in fresh_ids and self._sane_reading(r)]
             if fresh:
                 matched: Dict[str, Dict] = {}
 
@@ -913,44 +917,24 @@ class AQIService:
                     return left or None
 
                 # Tier 1 — fresh reference network.
-                pool = [r for r in fresh
-                        if self._is_reference_source(
-                            getattr(r, "provider", "unknown"),
-                            getattr(r, "station_name", ""))
-                        and self._sane_reading(r)]
                 remaining = _remaining()
-                if pool and remaining:
+                if remaining:
                     matched.update(self._match_pool(
-                        pool, radius_km=self.FRESH_REF_RADIUS_KM,
+                        fresh, radius_km=self.FRESH_REF_RADIUS_KM,
                         only_ids=remaining))
-                # Tier 2 — fresh private, sane and strictly local
-                # (disjoint from tier 1 by the reference test).
+                # Tier 2 — stale reference fallback (STALE-badged).
                 remaining = _remaining()
                 if remaining:
-                    pool = [r for r in fresh
-                            if not self._is_reference_source(
-                                getattr(r, "provider", "unknown"),
-                                getattr(r, "station_name", ""))
-                            and self._sane_reading(r)]
-                    if pool:
-                        matched.update(self._match_pool(
-                            pool, radius_km=self.FRESH_PRIVATE_RADIUS_KM,
-                            only_ids=remaining))
-                # Tier 3 — stale reference fallback (STALE-badged).
-                remaining = _remaining()
-                if remaining:
-                    pool = [r for r in readings
+                    pool = [r for r in ref
                             if id(r) not in fresh_ids
-                            and self._is_reference_source(
-                                getattr(r, "provider", "unknown"),
-                                getattr(r, "station_name", ""))
                             and self._sane_reading(r)]
                     if pool:
                         matched.update(self._match_pool(
                             pool, radius_km=self.STALE_REF_RADIUS_KM,
                             only_ids=remaining))
                 return matched
-        return self._match_pool(readings)
+        return self._match_pool([r for r in ref
+                                 if self._sane_reading(r)])
 
     def _match_pool(self, readings: List[Any], radius_km: float = 25.0,
                     only_ids: Optional[set] = None) -> Dict[str, Dict]:
