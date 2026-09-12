@@ -2,7 +2,7 @@
   "db": "C:\\Users\\Anant\\Desktop\\All Projects Btech\\SIH\\data\\aqi_data.db",
   "gbm_backend": "sklearn-histgbm",
   "xgboost_available": false,
-  "generated_at": "2026-09-12T06:15:12.040831+00:00",
+  "generated_at": "2026-09-12T06:50:14.387836+00:00",
   "stations": 54,
   "readings": 16976,
   "hourly_continuity": {
@@ -16,9 +16,13 @@
     "reason": "deferred: 98% hourly continuity but only 29 days span \u2014 TFT needs 4+ weeks of regime diversity"
   },
   "samples": 16536,
+  "fires": {
+    "hotspots": 79,
+    "sample_coverage": 0.233
+  },
   "weather": {
     "coverage": 1.0,
-    "fetched_now": true,
+    "fetched_now": false,
     "cache": "data/weather_history.json"
   },
   "holdout": {

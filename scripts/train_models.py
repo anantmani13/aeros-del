@@ -29,7 +29,7 @@ import json
 import math
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -103,11 +103,46 @@ async def ensure_weather_cache(stations, start, end, cache_path):
     return cache, True
 
 
-async def build_samples(series, wx=None):
+def load_fires(db_path):
+    """All persisted fires, sorted: [(utc, frp, dist_km)]."""
+    con = sqlite3.connect(db_path)
+    rows = con.execute(
+        "SELECT acq_date, frp, distance_to_delhi_km FROM fire_data "
+        "ORDER BY acq_date").fetchall()
+    con.close()
+    out = []
+    for acq, frp, dist in rows:
+        try:
+            ts = datetime.fromisoformat(str(acq).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        out.append((ts, float(frp or 0), float(dist or 999)))
+    return out
+
+
+def fire_summary_at(fires, end_ts, window_h=48):
+    """Fires in the 48h before a sample: count, FRP, nearest.
+
+    Same shape as the live fire_stats FeatureEngineer consumes
+    (total_fires / total_frp / nearest_km) — zeros when fire-blind.
+    """
+    from bisect import bisect_left, bisect_right
+    times = [f[0] for f in fires]
+    lo = bisect_left(times, end_ts - timedelta(hours=window_h))
+    hi = bisect_right(times, end_ts)
+    win = fires[lo:hi]
+    if not win:
+        return {"total_fires": 0, "total_frp": 0.0, "nearest_km": 999.0}, 0
+    return {"total_fires": len(win),
+            "total_frp": round(sum(f[1] for f in win), 1),
+            "nearest_km": round(min(f[2] for f in win), 1)}, 1
+
+
+async def build_samples(series, wx=None, fires=None):
     fe = FeatureEngineer()
     pbl_model = PBLModel()
     samples = []  # (timestamp, features, target)
-    wx_hits = 0
+    wx_hits = fire_hits = 0
     for sid, pts in series.items():
         if len(pts) < MIN_PRIOR_POINTS + 1:
             continue
@@ -137,14 +172,19 @@ async def build_samples(series, wx=None):
                 except Exception:
                     aisi = 2.0
                 physics = {"aisi": aisi, "pbl": pbl}
+            fire_dict, hit = fire_summary_at(fires or [], end_ts) \
+                if fires is not None else (None, 0)
+            fire_hits += hit
             feats = fe.build_features(
                 station_id=sid, readings=window,
-                weather=wx_dict, fire_summary=None, physics=physics,
+                weather=wx_dict, fire_summary=fire_dict, physics=physics,
                 now=end_ts,
             )
             samples.append((pts[i + 1]["timestamp"], feats, float(target)))
     samples.sort(key=lambda s: s[0])
-    return samples, (wx_hits / len(samples) if samples else 0.0)
+    n = len(samples)
+    return samples, ((wx_hits / n if n else 0.0),
+                     (fire_hits / n if n else 0.0))
 
 
 def pearson(xs, ys):
@@ -237,11 +277,16 @@ async def run_training(db: str = "data/aqi_data.db",
         stations = _json.loads((_DD / "stations.json").read_text())["stations"]
         wx, wx_fetched = await ensure_weather_cache(
             stations, min(all_ts), max(all_ts), weather_cache)
-    samples, wx_cov = await build_samples(series, wx)
+    fires = load_fires(str(db))
+    print(f"Fire history: {len(fires)} hotspots")
+    samples, (wx_cov, fire_cov) = await build_samples(series, wx, fires)
     print(f"Training samples: {len(samples)} (need >={min_samples})"
-          + (f" | weather coverage: {wx_cov:.0%} "
-             f"({'fetched' if wx_fetched else 'cache'})" if use_weather else ""))
+          + (f" | weather: {wx_cov:.0%} "
+             f"({'fetched' if wx_fetched else 'cache'})" if use_weather else "")
+          + f" | fire-active: {fire_cov:.0%}")
     report["samples"] = len(samples)
+    report["fires"] = {"hotspots": len(fires),
+                       "sample_coverage": round(fire_cov, 3)}
     if use_weather:
         report["weather"] = {"coverage": round(wx_cov, 3),
                              "fetched_now": wx_fetched,
