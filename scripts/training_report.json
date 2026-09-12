@@ -2,32 +2,39 @@
   "db": "C:\\Users\\Anant\\Desktop\\All Projects Btech\\SIH\\data\\aqi_data.db",
   "gbm_backend": "sklearn-histgbm",
   "xgboost_available": false,
+  "generated_at": "2026-09-12T06:15:12.040831+00:00",
   "stations": 54,
   "readings": 16976,
   "hourly_continuity": {
     "consecutive_pairs": 16922,
     "hourly_pairs": 16607,
-    "fraction": 0.981
+    "fraction": 0.981,
+    "span_days": 29
   },
   "tft": {
     "trained": false,
-    "reason": "skip: only 98% of pairs are hourly \u2014 TFT needs dense hourly sequences"
+    "reason": "deferred: 98% hourly continuity but only 29 days span \u2014 TFT needs 4+ weeks of regime diversity"
   },
   "samples": 16536,
+  "weather": {
+    "coverage": 1.0,
+    "fetched_now": true,
+    "cache": "data/weather_history.json"
+  },
   "holdout": {
     "train_n": 13228,
     "test_n": 3308,
     "persistence": {
-      "mae": 8.65,
-      "rmse": 14.92
+      "mae": 8.64,
+      "rmse": 14.89
     }
   },
   "lgbm": {
     "trained": true,
     "backend": "sklearn",
-    "model_mae": 9.3,
-    "model_rmse": 15.75,
-    "pearson_r": 0.747,
+    "model_mae": 11.06,
+    "model_rmse": 17.15,
+    "pearson_r": 0.692,
     "saved": false
   },
   "xgboost": {

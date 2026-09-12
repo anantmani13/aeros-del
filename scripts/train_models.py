@@ -38,6 +38,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from backend.ml.feature_engineering import FeatureEngineer
 from backend.ml.lightgbm_forecaster import LightGBMForecaster
 from backend.ml.xgboost_forecaster import XGBoostForecaster
+from backend.data.weather_client import WeatherClient
+from backend.physics.pbl_model import PBLModel
+from backend.formulas.aisi_formulas import calculate_aisi
 
 MIN_PRIOR_POINTS = 12   # need some lag context before a row becomes a sample
 MIN_SAMPLES = 300       # below this, trees just memorize noise
@@ -70,9 +73,41 @@ def load_readings(db_path):
     return series
 
 
-def build_samples(series):
+async def ensure_weather_cache(stations, start, end, cache_path):
+    """Fetch-once ERA5 archive per station; reuse until the span grows."""
+    from backend.app.config import DATA_DIR as _DD
+    cache_file = PROJECT_ROOT / cache_path
+    cache = {}
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text())
+        except Exception:
+            cache = {}
+    have = set()
+    for v in cache.values():
+        have.update(v.keys())
+    need_start = start.strftime("%Y-%m-%dT%H:00:00Z")
+    need_end = end.strftime("%Y-%m-%dT%H:00:00Z")
+    if cache and min(have, default="~") <= need_start \
+            and max(have, default="") >= need_end:
+        return cache, False
+    client = WeatherClient()
+    fresh = await client.get_history_batch(
+        [{"id": s["id"], "latitude": s["latitude"],
+          "longitude": s["longitude"]} for s in stations],
+        start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+    await client.close()
+    cache.update(fresh)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(json.dumps(cache))
+    return cache, True
+
+
+async def build_samples(series, wx=None):
     fe = FeatureEngineer()
+    pbl_model = PBLModel()
     samples = []  # (timestamp, features, target)
+    wx_hits = 0
     for sid, pts in series.items():
         if len(pts) < MIN_PRIOR_POINTS + 1:
             continue
@@ -83,13 +118,33 @@ def build_samples(series):
             target = pts[i + 1]["pollutants"].get("pm25")
             if target is None:
                 continue
+            end_ts = window[-1]["timestamp"]
+            hour_key = end_ts.strftime("%Y-%m-%dT%H:00:00Z")
+            wx_dict, physics = None, None
+            if wx and hour_key in wx.get(sid, {}):
+                wx_hits += 1
+                wx_dict = dict(wx[sid][hour_key])
+                # Real ERA5 PBL + recomputed inversion/Ri/AISI per sample —
+                # same physics path as the live server, not defaults.
+                ist_hour = (end_ts.hour + 5
+                            + (1 if end_ts.minute >= 30 else 0)) % 24
+                pbl = await pbl_model.compute(wx_dict, hour_ist=ist_hour)
+                try:
+                    aisi = calculate_aisi(
+                        pbl.get("inversion_strength_k", 0.0),
+                        pbl.get("pbl_height_m", 700.0),
+                        pbl.get("ri_bulk", 0.1))
+                except Exception:
+                    aisi = 2.0
+                physics = {"aisi": aisi, "pbl": pbl}
             feats = fe.build_features(
                 station_id=sid, readings=window,
-                weather=None, fire_summary=None, physics=None,
+                weather=wx_dict, fire_summary=None, physics=physics,
+                now=end_ts,
             )
             samples.append((pts[i + 1]["timestamp"], feats, float(target)))
     samples.sort(key=lambda s: s[0])
-    return samples
+    return samples, (wx_hits / len(samples) if samples else 0.0)
 
 
 def pearson(xs, ys):
@@ -114,7 +169,9 @@ def stats(errs):
 
 async def run_training(db: str = "data/aqi_data.db",
                        min_samples: int = MIN_SAMPLES,
-                       force_sklearn: bool = False) -> dict:
+                       force_sklearn: bool = False,
+                       use_weather: bool = True,
+                       weather_cache: str = "data/weather_history.json") -> dict:
     """Train + gate + (maybe) save ensemble weights. Returns report dict.
 
     Importable so the running server can auto-retrain itself
@@ -172,9 +229,23 @@ async def run_training(db: str = "data/aqi_data.db",
     report["tft"] = {"trained": False, "reason": tft_note}
     print("TFT:", tft_note)
 
-    samples = build_samples(series)
-    print(f"Training samples: {len(samples)} (need >={min_samples})")
+    wx, wx_fetched, wx_cov = None, False, 0.0
+    if use_weather:
+        import json as _json
+        from backend.app.config import DATA_DIR as _DD
+        all_ts = [p["timestamp"] for pts in series.values() for p in pts]
+        stations = _json.loads((_DD / "stations.json").read_text())["stations"]
+        wx, wx_fetched = await ensure_weather_cache(
+            stations, min(all_ts), max(all_ts), weather_cache)
+    samples, wx_cov = await build_samples(series, wx)
+    print(f"Training samples: {len(samples)} (need >={min_samples})"
+          + (f" | weather coverage: {wx_cov:.0%} "
+             f"({'fetched' if wx_fetched else 'cache'})" if use_weather else ""))
     report["samples"] = len(samples)
+    if use_weather:
+        report["weather"] = {"coverage": round(wx_cov, 3),
+                             "fetched_now": wx_fetched,
+                             "cache": weather_cache}
 
     if len(samples) < min_samples:
         report["verdict"] = (
@@ -272,9 +343,12 @@ async def main():
     ap.add_argument("--min-samples", type=int, default=MIN_SAMPLES)
     ap.add_argument("--force-sklearn", action="store_true",
                     help="use sklearn HistGBM so weights load on Render free-tier")
+    ap.add_argument("--no-weather", action="store_true",
+                    help="ablation: train without ERA5 weather (proves its value)")
     args = ap.parse_args()
     report = await run_training(db=args.db, min_samples=args.min_samples,
-                                force_sklearn=args.force_sklearn)
+                                force_sklearn=args.force_sklearn,
+                                use_weather=not args.no_weather)
     out = PROJECT_ROOT / "scripts" / "training_report.json"
     out.write_text(json.dumps(report, indent=2, default=str))
     print(f"Report: {out}")

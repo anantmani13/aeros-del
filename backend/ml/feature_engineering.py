@@ -49,6 +49,7 @@ class FeatureEngineer:
         weather: Optional[Dict] = None,
         fire_summary: Optional[Dict] = None,
         physics: Optional[Dict] = None,
+        now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """
         Build a single feature vector for the most recent station hour.
@@ -60,6 +61,9 @@ class FeatureEngineer:
             weather: Optional current weather dict.
             fire_summary: Optional fire aggregate dict.
             physics: Optional dict from AISICalculator / RadiationFeedback.
+            now: Reference datetime for hour/dow/month features. Defaults
+                to live now; training passes the window-end timestamp so
+                temporal features are historically correct.
 
         Returns:
             Flat dictionary of numeric features (JSON serializable).
@@ -87,7 +91,7 @@ class FeatureEngineer:
         )
 
         # ── Temporal features ────────────────────────────────────────
-        now = datetime.now()
+        now = now or datetime.now()
         features["hour"] = now.hour
         features["day_of_week"] = now.weekday()
         features["month"] = now.month

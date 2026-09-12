@@ -198,9 +198,10 @@ class WeatherClient:
                     "wind_direction_10m",
                     "surface_pressure",
                     "cloud_cover",
-                    "shortwave_radiation",
+                    "boundary_layer_height",
                 ]),
-                "timezone": "Asia/Kolkata",
+                "wind_speed_unit": "ms",
+                "timezone": "UTC",
             }
 
             response = await client.get(historical_url, params=params)
@@ -213,6 +214,56 @@ class WeatherClient:
             logger.error(f"Historical weather fetch failed: {e}")
 
         return None
+
+    async def get_history_batch(
+        self,
+        points: List[Dict],
+        start_date: str,
+        end_date: str,
+    ) -> Dict[str, Dict[str, Dict]]:
+        """Archive weather per station for training-data joins.
+
+        Args:
+            points: List of {id, latitude, longitude} (e.g. stations.json)
+            start_date / end_date: YYYY-MM-DD covering the DB span
+
+        Returns:
+            {station_id: {hourISO(Z): {temperature_c, relative_humidity,
+             wind_speed_ms, wind_direction_deg, pressure_hpa,
+             cloud_cover_pct, pbl_height_m}}} — keys match what
+            FeatureEngineer/PBLModel expect.
+        """
+        out: Dict[str, Dict[str, Dict]] = {}
+        for pt in points:
+            try:
+                raw = await self.get_historical_weather(
+                    pt["latitude"], pt["longitude"], start_date, end_date)
+            except Exception as e:
+                logger.warning("history failed for %s: %s", pt.get("id"), e)
+                continue
+            if not raw or not raw.get("timestamps"):
+                continue
+            series = {}
+            n = len(raw["timestamps"])
+            for i in range(n):
+                ts = raw["timestamps"][i]
+                hour = (ts[:13] + ":00:00Z") if len(ts) >= 13 else None
+                if not hour:
+                    continue
+                get = lambda k: (raw.get(k) or [None] * n)[i]
+                series[hour] = {
+                    "temperature_c": get("temperature_c"),
+                    "relative_humidity": get("relative_humidity"),
+                    "wind_speed_ms": get("wind_speed_ms"),
+                    "wind_direction_deg": get("wind_direction_deg"),
+                    "pressure_hpa": get("pressure_hpa"),
+                    "cloud_cover_pct": get("cloud_cover_pct"),
+                    "pbl_height_m": get("pbl_height_m"),
+                }
+            out[pt["id"]] = series
+        logger.info("Weather history: %d stations, ~%d hours each",
+                    len(out), min((len(v) for v in out.values()), default=0))
+        return out
 
     def _parse_hourly(self, hourly: Dict) -> Dict:
         """Parse Open-Meteo hourly response into clean dict."""
