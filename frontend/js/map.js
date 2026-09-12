@@ -114,6 +114,26 @@
           'circle-stroke-width': 1.4,
         },
       });
+      // Readable place labels — the "black map, can't read locations"
+      // complaint was missing text: dots alone say nothing.
+      this.map.addLayer({
+        id: 'station-labels',
+        type: 'symbol',
+        source: 'stations',
+        layout: {
+          'text-field': ['get', 'name'],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 7, 9, 10, 11],
+          'text-offset': [0, 1.15],
+          'text-anchor': 'top',
+          'text-allow-overlap': false,
+          'text-ignore-placement': false,
+        },
+        paint: {
+          'text-color': 'rgba(255,255,255,0.88)',
+          'text-halo-color': 'rgba(5,8,25,0.9)',
+          'text-halo-width': 1.4,
+        },
+      });
 
       // Fire hotspots (pulsing red)
       this.map.addSource('fires', { type: 'geojson', data: emptyFC() });
@@ -252,7 +272,7 @@
         heat: 'pm25-heat',
         fires: ['fires', 'fires-halo'],
         plumes: 'plumes-dash',
-        stations: ['stations', 'stations-glow'],
+        stations: ['stations', 'stations-glow', 'station-labels'],
       };
       const targets = layerIds[id];
       if (!targets) return;

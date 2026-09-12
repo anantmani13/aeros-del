@@ -138,6 +138,7 @@
         </div>
         <canvas id="aisiSpark"></canvas>
         <div class="grap-badge" id="grapBadge">—</div>
+        <div class="aisi-sub" id="aisiNote"></div>
       </section>
 
       <!-- Station list -->
@@ -150,6 +151,7 @@
           <input id="stationSearch" class="station-search" type="text"
                  placeholder="Search stations…" autocomplete="off">
         </div>
+        <div class="station-head"><span>Station</span><span>AQI</span></div>
         <div class="station-list" id="stationList"></div>
       </section>
 
@@ -168,6 +170,21 @@
           <canvas id="forecastChart"></canvas>
         </div>
         <div class="forecast-model-notes" id="modelNotes">—</div>
+      </section>
+
+      <!-- Forecast skill -->
+      <section class="card glass" id="accuracyCard">
+        <div class="card-head">
+          <h2>Forecast Skill</h2>
+          <button class="mini-btn" id="btnAccuracy" title="Recompute skill on saved history">↻</button>
+        </div>
+        <div class="acc-grid">
+          <div class="acc-cell"><span class="k">MAE 24h</span><span class="v" id="accMae">—</span></div>
+          <div class="acc-cell"><span class="k">RMSE</span><span class="v" id="accRmse">—</span></div>
+          <div class="acc-cell"><span class="k">Skill</span><span class="v" id="accSkill">—</span></div>
+          <div class="acc-cell"><span class="k">Cat hit</span><span class="v" id="accCat">—</span></div>
+        </div>
+        <div class="acc-note" id="accNote">Loading skill… <a href="/docs" target="_blank">full table: /api/v1/accuracy/stations</a></div>
       </section>
 
       <!-- Alerts -->

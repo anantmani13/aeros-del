@@ -124,6 +124,11 @@
       const csvBtn = document.getElementById('btnCsv');
       if (csvBtn) csvBtn.addEventListener('click', () => this._exportCSV());
 
+      // Accuracy refresh (recomputes skill on saved SQLite history)
+      const accBtn = document.getElementById('btnAccuracy');
+      if (accBtn) accBtn.addEventListener('click', () => this._renderAccuracy(true));
+      this._renderAccuracy(false);
+
       // Advisory language toggle (EN / हिंदी — same data, template engine)
       document.querySelectorAll('#langToggle button').forEach((btn) => {
         btn.addEventListener('click', () => {
@@ -189,6 +194,36 @@
         upd.textContent = snap.last_update
           ? `Updated ${Utils.fmtDT(snap.last_update)} · ${src.toUpperCase()}`
           : '—';
+      }
+
+      // Accuracy (fetch once per snapshot; cheap cached endpoint)
+      this._renderAccuracy(false);
+    },
+
+    async _renderAccuracy(force) {
+      if (!force && this._accLoaded) return;
+      const note = document.getElementById('accNote');
+      try {
+        if (note && force) note.textContent = 'Recomputing…';
+        const r = await Utils.fetchJSON('/api/v1/accuracy/summary');
+        if (!r.available) {
+          if (note) note.textContent = (r.reason || 'No history yet — run server longer.');
+          return;
+        }
+        // Prefer the long-lead bucket (>6h ≈ 24h skill); fall back to any.
+        const b = r.buckets?.['>6h']?.baseline || r.buckets?.['<=1h']?.baseline || {};
+        const skill = r.skill_vs_persistence?.['>6h'];
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+        set('accMae', b.mae != null ? b.mae : '—');
+        set('accRmse', b.rmse != null ? b.rmse : '—');
+        set('accSkill', skill != null ? (skill > 0 ? '+' + (skill * 100).toFixed(0) + '%' : (skill * 100).toFixed(0) + '%') : '—');
+        set('accCat', b.cat_acc != null ? Math.round(b.cat_acc * 100) + '%' : '—');
+        if (note) note.innerHTML =
+          `${r.pairs} tested pairs · r=${r.pearson_r_baseline} · ` +
+          `<a href="/api/v1/accuracy/stations" target="_blank">per-station AQI table (54)</a>`;
+        this._accLoaded = true;
+      } catch (e) {
+        if (note) note.textContent = 'Skill unavailable (backend offline).';
       }
     },
 
@@ -280,8 +315,20 @@
       trendEl.textContent = `${t.icon || '→'} ${t.direction || 'Stable'} (Δ${t.delta ?? 0})`;
 
       const grap = aisi.grap || {};
+      const basis = aisi.grap_basis;
       document.getElementById('grapBadge').textContent =
-        `GRAP Recommendation: Stage ${grap.stage || 'None'} — ${grap.label || 'Normal'}`;
+        `GRAP Recommendation: Stage ${grap.stage || 'None'} — ${grap.label || 'Normal'}` +
+        (basis ? ` (worst PM2.5 ${basis.pm25_used})` : '');
+      const noteEl = document.getElementById('aisiNote');
+      if (noteEl) {
+        const st = aisi.sub_terms || {};
+        const parts = [];
+        if (aisi.context_note) parts.push(aisi.context_note);
+        if (st.term_grad != null) {
+          parts.push(`grad ${st.term_grad} + PBL ${st.term_pbl} + Ri ${st.term_ri} pts`);
+        }
+        noteEl.textContent = parts.join(' · ');
+      }
 
       drawSparkline(document.getElementById('aisiSpark'), aisi.history || [], color);
 

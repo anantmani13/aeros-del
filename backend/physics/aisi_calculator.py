@@ -99,6 +99,22 @@ class AISICalculator:
 
         category, description, color = aisi_severity_category(aisi)
 
+        # Daytime context note so "AISI 0 at 10 AM" doesn't look broken:
+        # deep PBL + lapse = well-mixed midday, inversion rebuilds at night.
+        pblh = pbl.get("pbl_height_m", 700.0) or 700.0
+        if aisi < 2.0 and pblh > 600 and temp_grad < 0:
+            context_note = (f"Daytime well-mixed (PBL ~{pblh:.0f} m, "
+                            f"lapse {temp_grad:.2f} K/100m) — "
+                            f"inversion rebuilds after sunset.")
+        elif aisi >= 8.0:
+            context_note = ("Severe nocturnal trapping — shallow PBL + "
+                            "strong inversion. Expect slow dispersion.")
+        elif aisi >= 5.0:
+            context_note = ("Evening/night inversion building — "
+                            "ventilation degrading.")
+        else:
+            context_note = "Transitional mixing — watch evening trend."
+
         result = {
             "aisi": round(aisi, 2),
             "aisi_raw": round(raw_aisi, 2),
@@ -117,6 +133,7 @@ class AISICalculator:
             },
             "pbl": pbl,
             "grap": grap_activation_level(aisi, pm25=pm25 or 0.0),
+            "context_note": context_note,
             "trend": self._trend(),
         }
 

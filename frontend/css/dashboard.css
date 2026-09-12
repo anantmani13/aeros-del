@@ -157,13 +157,43 @@
   border-radius: var(--radius-md);
   backdrop-filter: blur(10px);
 }
-.map-overlay.top-left    { top: 14px; left: 14px; }
+.map-overlay.top-left    { top: 14px; left: 14px; max-width: 250px; }
 .map-overlay.top-right   { top: 14px; right: 14px; }
-.map-overlay.bottom-center { bottom: 14px; left: 50%; transform: translateX(-50%); }
+/* Missing rule — without this the fire/PBL note defaulted to top-left
+   and covered the legend (the overlap in your screenshot). */
+.map-overlay.bottom-left  { bottom: 52px; left: 14px; max-width: 300px; }
+.map-overlay.bottom-center { bottom: 14px; left: 50%; transform: translateX(-50%); max-width: 92%; }
+.altitude-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mid);
+}
+/* Brighter basemap: CARTO dark_all is near-black; lift labels/roads
+   without washing out the heatmap. */
+#map .maplibregl-canvas { filter: brightness(1.35) contrast(1.08) saturate(0.92); }
+/* Dark-style map controls (default white buttons glared on dark map). */
+.maplibregl-ctrl-group {
+  background: rgba(10,14,39,0.85) !important;
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5) !important;
+  overflow: hidden;
+}
+.maplibregl-ctrl-group button { background: transparent !important; }
+.maplibregl-ctrl-group button span { filter: invert(0.85); }
+.maplibregl-ctrl-scale {
+  background: rgba(10,14,39,0.8) !important;
+  color: var(--text-mid) !important;
+  border-color: rgba(255,255,255,0.25) !important;
+  font-size: 10px;
+}
+.maplibregl-ctrl-attrib { background: rgba(10,14,39,0.7) !important; }
+.maplibregl-ctrl-attrib a { color: var(--text-dim) !important; }
+/* Move status pill above the time slider so they never collide. */
+.map-status { bottom: 56px; }
 
 .panel-title { font-family: var(--font-head); font-weight: 600; font-size: 13px; }
 
-.legend { display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.legend { display: flex; gap: 8px 10px; margin-top: 8px; flex-wrap: wrap; max-width: 220px; }
 .legend span {
   font-size: 10px;
   color: var(--text-mid);
@@ -423,6 +453,33 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--text-dim);
   flex-shrink: 0;
 }
+
+/* ── Accuracy card ──────────────────────────────────────────── */
+.acc-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 6px 0 8px;
+}
+.acc-cell {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  text-align: center;
+}
+.acc-cell .k { display: block; font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+.acc-cell .v { font-family: var(--font-data); font-size: 14px; font-weight: 700; color: var(--text-strong); }
+.acc-note { font-size: 11px; color: var(--text-dim); line-height: 1.5; text-align: center; }
+.acc-note a { color: var(--electric); }
+/* ── Station header row (Station | AQI label) ─────────────────── */
+.station-head {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  padding: 2px 12px 6px;
+}
+.aisi-sub { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin-top: 6px; }
 
 /* ── Pulse layer ──────────────────────────────────────────────── */
 .pulse-layer {

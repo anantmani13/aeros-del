@@ -253,13 +253,24 @@ class AQIService:
 
         # Mean PM2.5 across resolved stations (needed BEFORE AISI so
         # GRAP stage agrees with the AQI category, not just meteorology).
+        # GRAP uses the WORST station (protective, matches the "Worst
+        # Station" header) — mean would hide a Poor hotspot behind a
+        # clean city average (e.g. mean AQI 72 + worst 285).
         records = self.state.get("raw_records", [])
         pm25s = [r.get("pollutants", {}).get("pm25") for r in records]
         pm25s = [p for p in pm25s if p is not None]
         mean_pm25 = sum(pm25s) / len(pm25s) if pm25s else 120.0
+        worst_pm25 = max(pm25s) if pm25s else mean_pm25
 
         aisi_result = await self._safe(
-            self.aisi.compute(weather, pm25=mean_pm25))
+            self.aisi.compute(weather, pm25=worst_pm25))
+        if aisi_result:
+            aisi_result["grap_basis"] = {
+                "pm25_used": round(worst_pm25, 1),
+                "mean_pm25": round(mean_pm25, 1),
+                "note": "GRAP from worst station (protective); "
+                        "AISI itself is meteorology-only.",
+            }
         self.state["aisi"] = aisi_result or {}
 
         pblh = (aisi_result or {}).get("pbl", {}).get("pbl_height_m", 700.0)
