@@ -49,6 +49,11 @@ class TFTForecaster:
         self._torch = None
         self._model = None
 
+    @property
+    def is_trained(self) -> bool:
+        """True only when real torch weights are loaded (not baseline)."""
+        return self._model is not None
+
     async def train(self, sequences: List[Dict]) -> Dict:
         """
         Optional PyTorch training path.

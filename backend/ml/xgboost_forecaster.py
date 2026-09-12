@@ -120,6 +120,11 @@ class XGBoostForecaster:
         self._model = None
         self._feature_names = None
 
+    @property
+    def is_trained(self) -> bool:
+        """True only when real fitted weights are loaded (not baseline)."""
+        return self._model is not None and bool(self._feature_names)
+
     async def train(
         self,
         features: List[Dict[str, Any]],

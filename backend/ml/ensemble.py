@@ -127,7 +127,15 @@ class EnsembleForecaster:
             (self.lgbm_weight, lgbm_pred),
         ]
         wsum = sum(w for w, _ in members) or 1.0
-        models = {"tft": True, "xgboost": True, "lightgbm": True}
+        # Honest labels: only claim a member when its fitted weights are
+        # actually loaded. Otherwise the dashboard shows "baseline".
+        models = {
+            "tft": bool(getattr(self.tft, "is_trained", False)),
+            "xgboost": bool(getattr(self.xgb, "is_trained", False)),
+            "lightgbm": bool(getattr(self.lgbm, "is_trained", False)),
+        }
+        if not any(models.values()):
+            models = {"baseline": True}
 
         def _blend(key: str) -> List[float]:
             out = []

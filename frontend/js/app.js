@@ -398,7 +398,8 @@
         this.forecastChart.setData(forecast);
         this.state.exportPayload = { station, forecast };
         const model = Object.keys(forecast.models || {})
-          .filter((k) => forecast.models[k]);
+          .filter((k) => forecast.models[k])
+          .map((k) => (k === 'baseline' ? 'statistical baseline' : k));
         const histN = (station.history || []).length;
         document.getElementById('modelNotes').textContent =
           `Ensemble: ${model.join(' + ') || 'statistical baseline'} · ${forecast.timestamps.length}h` +
