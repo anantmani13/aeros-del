@@ -9,16 +9,37 @@
   // Readable first: 'light' (Voyager) is the default because dark_all is
   // near-black on many laptop screens. Users can switch anytime; the
   // choice persists in localStorage.
+  // NOTE: CARTO raster tiles now watermark every tile with
+  // "API key required" unless a `?key=` is supplied, so the keyless
+  // defaults below use providers that need no key. A CARTO key (when
+  // configured) still restores the original CARTO look.
+  // Keyless defaults — these hosts serve tiles with NO key and therefore
+  // can never render a vendor "API key required" watermark.
   const BASE_STYLES = {
     light: {
-      tiles: ['https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'],
-      attr: '© OpenStreetMap contributors © CARTO',
+      tiles: [
+        'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      ],
+      attr: '© OpenStreetMap contributors',
+      maxzoom: 19,
     },
     dark: {
-      tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
-      attr: '© OpenStreetMap contributors © CARTO',
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'],
+      attr: 'Powered by Esri © OpenStreetMap contributors',
+      maxzoom: 19,
     },
   };
+
+  function keylessTiles(style) {
+    return BASE_STYLES[style].tiles;
+  }
+
+  function cartoTiles(style, key) {
+    const path = style === 'dark' ? 'dark_all' : 'rastertiles/voyager';
+    return [`https://basemaps.cartocdn.com/${path}/{z}/{x}/{y}.png?key=${key}`];
+  }
 
   function maptilerTiles(key) {
     return [`https://api.maptiler.com/maps/darkmatter/{z}/{x}/{y}.png?key=${key}`];
@@ -37,22 +58,39 @@
   ];
 
   class AeriMap {
-    constructor(containerId, maptilerKey) {
+    constructor(containerId, maptilerKey, cartoKey) {
       this.container = document.getElementById(containerId);
       this.onStationClick = null;
       this.currentHour = 0;
       this._forecasts = {};
-      // Basemap: saved choice (default light = readable). MapTiler key,
-      // when configured, upgrades the dark style only.
+      // Basemap: saved choice (default light = readable). ALWAYS keyless
+      // OSM / Esri by default so no vendor "API key required" watermark can
+      // ever appear. Key-based providers (CARTO / MapTiler) are only used
+      // when a key is configured AND the caller explicitly opts in — a bad
+      // or expired key must never break the map, so anything key-based that
+      // errors falls straight back to the keyless tiles.
       this.baseStyle = savedBasemap();
       document.body.dataset.basemap = this.baseStyle;
-      let tiles = BASE_STYLES[this.baseStyle].tiles;
+      let tiles = keylessTiles(this.baseStyle);
       let attribution = BASE_STYLES[this.baseStyle].attr;
-      if (maptilerKey && this.baseStyle === 'dark') {
-        tiles = maptilerTiles(maptilerKey);
-        attribution = '© MapTiler © OpenStreetMap contributors';
-      }
+      let maxzoom = BASE_STYLES[this.baseStyle].maxzoom || 22;
       this._maptilerKey = maptilerKey || null;
+      this._cartoKey = cartoKey || null;
+      this._usingKeyTiles = false;
+      // Only honor a CARTO key — it restores the old CARTO look. MapTiler
+      // is deliberately NOT auto-used: a stale/invalid MAPTILER_KEY in .env
+      // would otherwise keep the map broken in dark mode.
+      if (cartoKey) {
+        tiles = cartoTiles(this.baseStyle, cartoKey);
+        attribution = '© OpenStreetMap contributors © CARTO';
+        maxzoom = 22;
+        this._usingKeyTiles = true;
+      }
+      this._fallbackDone = false;
+      // Debug hook: open DevTools console and run
+      //   window.__aerosBaseTiles
+      // to see exactly which tile host the map is using.
+      try { window.__aerosBaseTiles = tiles.slice(); } catch (e) { /* ignore */ }
       this.map = new maplibregl.Map({
         container: this.container,
         style: {
@@ -62,6 +100,7 @@
               type: 'raster',
               tiles: tiles,
               tileSize: 256,
+              maxzoom: maxzoom,
               attribution: attribution,
             },
           },
@@ -79,12 +118,31 @@
       this.map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'bottom-right');
       this.map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
-      // If tiles are blocked (offline venue, firewall), say so instead of
-      // showing a black rectangle — dots + labels still work on the
-      // fallback background.
+      // If tiles are blocked (offline venue, firewall) — or a key-based
+      // provider rejects the key — fall back to the keyless tiles instead
+      // of showing a black rectangle or a vendor watermark. Dots + labels
+      // still work on the fallback background.
       this.map.on('error', (e) => {
         const src = (e && e.sourceId) || '';
         if (src === 'base') {
+          if (this._usingKeyTiles && !this._fallbackDone) {
+            this._fallbackDone = true;
+            this._usingKeyTiles = false;
+            try {
+              if (this.map.getLayer('base')) this.map.removeLayer('base');
+              if (this.map.getSource('base')) this.map.removeSource('base');
+              this.map.addSource('base', {
+                type: 'raster',
+                tiles: keylessTiles(this.baseStyle),
+                tileSize: 256,
+                maxzoom: BASE_STYLES[this.baseStyle].maxzoom || 22,
+                attribution: BASE_STYLES[this.baseStyle].attr,
+              });
+              const before = this.map.getLayer('pm25-heat') ? 'pm25-heat' : undefined;
+              this.map.addLayer({ id: 'base', type: 'raster', source: 'base' }, before);
+              try { window.__aerosBaseTiles = keylessTiles(this.baseStyle).slice(); } catch (err) { /* ignore */ }
+            } catch (err) { /* ignore */ }
+          }
           const el = document.getElementById('mapStatus');
           if (el) el.textContent = 'basemap tiles blocked (offline?) — stations still live';
         }
@@ -102,17 +160,22 @@
         b.classList.toggle('active', b.dataset.baseBtn === name);
       });
       if (!this.map.isStyleLoaded()) return;
-      let tiles = BASE_STYLES[name].tiles;
+      let tiles = keylessTiles(name);
       let attribution = BASE_STYLES[name].attr;
-      if (this._maptilerKey && name === 'dark') {
-        tiles = maptilerTiles(this._maptilerKey);
-        attribution = '© MapTiler © OpenStreetMap contributors';
+      let maxzoom = BASE_STYLES[name].maxzoom || 22;
+      this._usingKeyTiles = false;
+      if (this._cartoKey) {
+        tiles = cartoTiles(name, this._cartoKey);
+        attribution = '© OpenStreetMap contributors © CARTO';
+        maxzoom = 22;
+        this._usingKeyTiles = true;
       }
+      try { window.__aerosBaseTiles = tiles.slice(); } catch (e) { /* ignore */ }
       // Re-add raster at the bottom (before the heat layer when present).
       if (this.map.getLayer('base')) this.map.removeLayer('base');
       if (this.map.getSource('base')) this.map.removeSource('base');
       this.map.addSource('base', {
-        type: 'raster', tiles: tiles, tileSize: 256, attribution: attribution,
+        type: 'raster', tiles: tiles, tileSize: 256, maxzoom: maxzoom, attribution: attribution,
       });
       const before = this.map.getLayer('pm25-heat') ? 'pm25-heat' : undefined;
       this.map.addLayer({ id: 'base', type: 'raster', source: 'base' }, before);
