@@ -36,6 +36,28 @@
     return BASE_STYLES[style].tiles;
   }
 
+  // Tone ONLY the basemap raster. Vector overlays (stations, labels, ring,
+  // plumes) are separate layers, so they stay full-bright while the pale
+  // light tiles get dimmed a touch (~10%) to let overlays pop.
+  function basePaint(style) {
+    if (style === 'light') {
+      return {
+        'raster-brightness-max': 0.88,
+        'raster-saturation': -0.15,
+        'raster-contrast': 0.03,
+      };
+    }
+    return {};
+  }
+
+  // Delhi ring tone per basemap — pale cyan washes out on light tiles.
+  function ringPaint(style) {
+    if (style === 'light') {
+      return { 'line-color': '#0088a8', 'line-width': 1.8 };
+    }
+    return { 'line-color': 'rgba(0,212,255,0.55)', 'line-width': 1.4 };
+  }
+
   function cartoTiles(style, key) {
     const path = style === 'dark' ? 'dark_all' : 'rastertiles/voyager';
     return [`https://basemaps.cartocdn.com/${path}/{z}/{x}/{y}.png?key=${key}`];
@@ -108,6 +130,7 @@
             id: 'base',
             type: 'raster',
             source: 'base',
+            paint: basePaint(this.baseStyle),
           }],
         },
         center: DELHI_CENTER,
@@ -139,7 +162,7 @@
                 attribution: BASE_STYLES[this.baseStyle].attr,
               });
               const before = this.map.getLayer('pm25-heat') ? 'pm25-heat' : undefined;
-              this.map.addLayer({ id: 'base', type: 'raster', source: 'base' }, before);
+              this.map.addLayer({ id: 'base', type: 'raster', source: 'base', paint: basePaint(this.baseStyle) }, before);
               try { window.__aerosBaseTiles = keylessTiles(this.baseStyle).slice(); } catch (err) { /* ignore */ }
             } catch (err) { /* ignore */ }
           }
@@ -178,14 +201,22 @@
         type: 'raster', tiles: tiles, tileSize: 256, maxzoom: maxzoom, attribution: attribution,
       });
       const before = this.map.getLayer('pm25-heat') ? 'pm25-heat' : undefined;
-      this.map.addLayer({ id: 'base', type: 'raster', source: 'base' }, before);
-      // Keep place labels legible on either basemap.
+      this.map.addLayer({ id: 'base', type: 'raster', source: 'base', paint: basePaint(name) }, before);
+      // Keep place labels legible on either basemap — stronger halo on
+      // light so names stay crisp over the (dimmed) tiles.
       if (this.map.getLayer('station-labels')) {
         const dark = name === 'dark';
         this.map.setPaintProperty('station-labels', 'text-color',
-          dark ? 'rgba(255,255,255,0.88)' : 'rgba(16,20,46,0.92)');
+          dark ? 'rgba(255,255,255,0.88)' : 'rgba(16,20,46,0.95)');
         this.map.setPaintProperty('station-labels', 'text-halo-color',
-          dark ? 'rgba(5,8,25,0.9)' : 'rgba(255,255,255,0.85)');
+          dark ? 'rgba(5,8,25,0.9)' : 'rgba(255,255,255,0.95)');
+        this.map.setPaintProperty('station-labels', 'text-halo-width', dark ? 1.4 : 1.8);
+      }
+      // Re-tone the Delhi ring for the new basemap.
+      if (this.map.getLayer('delhi-ring')) {
+        const rp = ringPaint(name);
+        this.map.setPaintProperty('delhi-ring', 'line-color', rp['line-color']);
+        this.map.setPaintProperty('delhi-ring', 'line-width', rp['line-width']);
       }
     }
 
@@ -230,7 +261,7 @@
         paint: {
           'circle-radius': 12,
           'circle-color': ['get', 'color'],
-          'circle-opacity': 0.25,
+          'circle-opacity': 0.3,
           'circle-blur': 1,
         },
       });
@@ -241,8 +272,8 @@
         paint: {
           'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 5, 10, 8],
           'circle-color': ['get', 'color'],
-          'circle-stroke-color': 'rgba(255,255,255,0.85)',
-          'circle-stroke-width': 1.4,
+          'circle-stroke-color': 'rgba(255,255,255,0.9)',
+          'circle-stroke-width': 1.6,
         },
       });
       // Readable place labels — the "black map, can't read locations"
@@ -261,10 +292,10 @@
         },
         paint: {
           'text-color': this.baseStyle === 'dark'
-            ? 'rgba(255,255,255,0.88)' : 'rgba(16,20,46,0.92)',
+            ? 'rgba(255,255,255,0.88)' : 'rgba(16,20,46,0.95)',
           'text-halo-color': this.baseStyle === 'dark'
-            ? 'rgba(5,8,25,0.9)' : 'rgba(255,255,255,0.85)',
-          'text-halo-width': 1.4,
+            ? 'rgba(5,8,25,0.9)' : 'rgba(255,255,255,0.95)',
+          'text-halo-width': this.baseStyle === 'dark' ? 1.4 : 1.8,
         },
       });
 
@@ -293,21 +324,33 @@
         },
       });
 
-      // Plume trajectories
+      // Plume trajectories — pale casing underneath so the dashes stay
+      // readable over bright light tiles.
       this.map.addSource('plumes', { type: 'geojson', data: emptyFC() });
+      this.map.addLayer({
+        id: 'plumes-casing',
+        type: 'line',
+        source: 'plumes',
+        paint: {
+          'line-color': 'rgba(255,255,255,0.55)',
+          'line-width': 5.5,
+          'line-opacity': 0.55,
+          'line-dasharray': [2, 1.4],
+        },
+      });
       this.map.addLayer({
         id: 'plumes-dash',
         type: 'line',
         source: 'plumes',
         paint: {
-          'line-color': ['interpolate', ['linear'], ['get', 'estimated_contribution_pm25'], 0, '#39ff14', 5, '#ffb800', 15, '#ff3838'],
-          'line-width': 2.2,
-          'line-opacity': 0.85,
+          'line-color': ['interpolate', ['linear'], ['get', 'estimated_contribution_pm25'], 0, '#22cc0e', 5, '#e09a00', 15, '#ff3838'],
+          'line-width': 3,
+          'line-opacity': 0.95,
           'line-dasharray': [2, 1.4],
         },
       });
 
-      // Delhi domain ring approximate boundary
+      // Delhi domain ring approximate boundary (toned per basemap)
       this.map.addSource('delhi-ring', {
         type: 'geojson',
         data: this._delhiRingGeoJSON(),
@@ -316,11 +359,7 @@
         id: 'delhi-ring',
         type: 'line',
         source: 'delhi-ring',
-        paint: {
-          'line-color': 'rgba(0,212,255,0.5)',
-          'line-width': 1.2,
-          'line-dasharray': [1, 1],
-        },
+        paint: Object.assign({ 'line-dasharray': [1, 1] }, ringPaint(this.baseStyle)),
       });
     }
 
@@ -404,7 +443,7 @@
       const layerIds = {
         heat: 'pm25-heat',
         fires: ['fires', 'fires-halo'],
-        plumes: 'plumes-dash',
+        plumes: ['plumes-dash', 'plumes-casing'],
         stations: ['stations', 'stations-glow', 'station-labels'],
       };
       const targets = layerIds[id];
