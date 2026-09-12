@@ -105,7 +105,7 @@ Missing keys = automatic demo fallback, no crash.
 | `GET /forecast/trigger?force=true` | Force refresh |
 | `GET /aisi/current` | AISI + GRAP stage |
 | `GET /alerts/current` | Latest advisories |
-| `GET /fire/current` | Hotspots + plume ETA |
+| `GET /fires/active` | Hotspots + plume ETA |
 | `GET /radiation/current` | Radiation deficit term |
 | `WS /ws/live` | Live push (send `ping`/`refresh`) |
 
