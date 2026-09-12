@@ -25,6 +25,7 @@ class Settings:
 
     # ── API Keys ──────────────────────────────────────────────────────
     openaq_api_key: Optional[str] = None
+    waqi_api_key: Optional[str] = None
     openweather_api_key: Optional[str] = None
     nasa_firms_api_key: Optional[str] = None
     gemini_api_key: Optional[str] = None
@@ -98,6 +99,7 @@ class Settings:
             xgb_weight=float(os.getenv("XGB_WEIGHT", "0.3")),
             lgbm_weight=float(os.getenv("LGBM_WEIGHT", "0.2")),
             openaq_api_key=os.getenv("OPENAQ_API_KEY"),
+            waqi_api_key=os.getenv("WAQI_API_KEY"),
             openweather_api_key=os.getenv("OPENWEATHER_API_KEY"),
             nasa_firms_api_key=os.getenv("NASA_FIRMS_API_KEY"),
             gemini_api_key=os.getenv("GEMINI_API_KEY"),

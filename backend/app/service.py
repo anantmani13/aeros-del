@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 from backend.app.config import Settings, PROJECT_ROOT, DATA_DIR, MODELS_DIR
 
 from backend.data.openaq_client import OpenAQClient
+from backend.data.waqi_client import WAQIClient
 from backend.data.weather_client import WeatherClient
 from backend.data.fire_client import FireClient
 from backend.data.naqi_calculator import NAQICalculator
@@ -55,6 +56,10 @@ class AQIService:
             rate_limit=self.settings.openaq_rate_limit,
             max_concurrency=self.settings.openaq_max_concurrency,
         )
+        # Secondary source: fills stations OpenAQ missed (max a few per
+        # cycle so the free-token rate limit never stalls refreshes).
+        self.waqi = WAQIClient(api_key=self.settings.waqi_api_key)
+        self.waqi_fill_cap = 8
         self.weather = WeatherClient()
         self.fire = FireClient(api_key=self.settings.nasa_firms_api_key)
         self.naqi = NAQICalculator()
@@ -172,6 +177,25 @@ class AQIService:
         """Fetch readings, weather, fires, and persist to SQLite."""
         readings = await self._safe(self.openaq.get_latest_measurements())
         mapped = self._match_readings(readings or [])
+
+        # WAQI fallback: fill stations OpenAQ missed (capped per cycle).
+        # Only fires when a key exists AND some stations are still dark.
+        waqi_filled = 0
+        if mapped and self.settings.waqi_api_key:
+            missing = [s for s in self.stations if s["id"] not in mapped]
+            for station in missing[:self.waqi_fill_cap]:
+                feed = await self._safe(self.waqi.get_station_feed(
+                    station["latitude"], station["longitude"]))
+                if feed and feed.get("pollutants"):
+                    mapped[station["id"]] = {
+                        "pollutants": feed["pollutants"],
+                        "timestamp": feed["timestamp"],
+                        "source": "waqi",
+                    }
+                    waqi_filled += 1
+        if waqi_filled:
+            logger.info("WAQI fallback filled %d stations", waqi_filled)
+        self.state["waqi_filled"] = waqi_filled
 
         # Fall back to demo generation when no stations resolved
         if not mapped:
@@ -597,6 +621,7 @@ class AQIService:
             "category_counts": category_counts,
             "fire_count": len(self.state.get("fires", [])),
             "data_source": self.state.get("data_source"),
+            "waqi_filled": self.state.get("waqi_filled", 0),
         }
 
     # ────────────────────────────────────────────────────────────────
@@ -912,5 +937,6 @@ class AQIService:
     async def close(self):
         """Close all HTTP clients."""
         await self._safe(self.openaq.close())
+        await self._safe(self.waqi.close())
         await self._safe(self.weather.close())
         await self._safe(self.fire.close())
