@@ -1,62 +1,76 @@
 {
-  "generated_at": "2026-09-12T04:39:59.242198+00:00",
+  "generated_at": "2026-09-12T06:26:33.735117+00:00",
   "db": "C:\\Users\\Anant\\Desktop\\All Projects Btech\\SIH\\data\\aqi_data.db",
-  "stations": 25,
+  "stations": 41,
   "next_observation_skill": {
-    "pairs": 30,
+    "pairs": 16667,
     "<=1h": {
       "baseline": {
-        "n": 4,
-        "mae": 77.96,
-        "rmse": 129.82,
-        "bias": 69.31,
-        "cat_acc": 0.0
+        "n": 16196,
+        "mae": 11.85,
+        "rmse": 21.13,
+        "bias": 8.23,
+        "cat_acc": 0.528
       },
       "persistence": {
-        "n": 4,
-        "mae": 58.99,
-        "rmse": 98.12,
-        "bias": 45.89,
-        "cat_acc": 0.75
+        "n": 16196,
+        "mae": 7.95,
+        "rmse": 17.16,
+        "bias": -0.17,
+        "cat_acc": 0.774
       }
     },
     "1-6h": {
       "baseline": {
-        "n": 1,
-        "mae": 4.18,
-        "rmse": 4.18,
-        "bias": 4.18,
-        "cat_acc": 0.0
+        "n": 366,
+        "mae": 17.82,
+        "rmse": 31.62,
+        "bias": 5.3,
+        "cat_acc": 0.473
       },
       "persistence": {
-        "n": 1,
-        "mae": 0.0,
-        "rmse": 0.0,
-        "bias": 0.0,
-        "cat_acc": 1.0
+        "n": 366,
+        "mae": 17.75,
+        "rmse": 30.53,
+        "bias": 4.73,
+        "cat_acc": 0.568
       }
     },
     ">6h": {
       "baseline": {
-        "n": 25,
-        "mae": 47.6,
-        "rmse": 64.72,
-        "bias": 43.67,
-        "cat_acc": 0.24
+        "n": 105,
+        "mae": 36.38,
+        "rmse": 86.0,
+        "bias": 18.23,
+        "cat_acc": 0.39
       },
       "persistence": {
-        "n": 25,
-        "mae": 40.16,
-        "rmse": 53.84,
-        "bias": 34.41,
-        "cat_acc": 0.2
+        "n": 105,
+        "mae": 36.73,
+        "rmse": 90.58,
+        "bias": 17.59,
+        "cat_acc": 0.514
       }
     },
-    "pearson_r_baseline": -0.001
+    "pearson_r_baseline": 0.742
   },
   "gbm_next_step": {
-    "trained": false,
-    "reason": "only 0 samples",
-    "samples": 0
+    "trained": true,
+    "backend": "lightgbm",
+    "train_n": 11481,
+    "test_n": 4921,
+    "gbm": {
+      "n": 4921,
+      "mae": 7.18,
+      "rmse": 10.95,
+      "bias": 0.02
+    },
+    "persistence_mean": {
+      "n": 4921,
+      "mae": 14.72,
+      "rmse": 19.48,
+      "bias": 1.18
+    },
+    "pearson_r": 0.827
   }
 }

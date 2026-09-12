@@ -175,14 +175,19 @@ Particle altitudes modelled: CPCB inlet / breathing zone `z ≈ 2 m`, plume inje
 
 ## Accuracy (measured, not claimed)
 
-`python scripts/evaluate_accuracy.py` backtests the live pipeline on same-sensor SQLite pairs (report in `scripts/accuracy_report.json`):
+**How it is calculated:** `python scripts/evaluate_accuracy.py` runs a walk-forward backtest on persisted SQLite observations — for every consecutive same-sensor pair it hindcasts with the live `statistical_baseline` at the true gap horizon and compares against naive persistence (carry-forward). Pairs are bucketed by lead (`≤1h / 1–6h / >6h`); metrics are MAE, RMSE, bias, Pearson r and AQI-category hit rate. Same numbers are served live at `GET /api/v1/accuracy/summary` and per station at `GET /api/v1/accuracy/stations`. Full report: `scripts/accuracy_report.json` (reproducible — rerun the script).
 
-| Lead | Baseline MAE / RMSE | Persistence MAE | Category hit |
-|------|--------------------|-----------------|--------------|
-| ~24 h (day-apart live pairs, n=25) | **32.2 / 42.3 µg/m³** | 40.2 | 24% |
-| ≤1 h (n=4) | 71.2 | 59.0 | — (too few) |
+Measured 2026-09-12 (16,667 pairs, 41 stations):
 
-Reference apps for comparison (all read the same CPCB CAAQMS sensors we ingest via OpenAQ): **CPCB SAMEER**, **SAFAR-Air (IITM Pune)**, **DPCC website**, **IQAir AirVisual**, **aqi.in**, **OpenAQ explorer**. Expected agreement on *current* AQI: near-identical (±sensor calibration) since it is the same underlying monitors. On *forecast* skill, published Delhi 24h PM2.5 RMSEs are ~30–50 µg/m³ with r ≈ 0.7–0.85 for trained systems (SAFAR/UrbanEmissions literature). Honest score of this prototype today: **~5/10** — the shipped baseline already beats persistence ~20% at day scale, but with no trained weights and days (not months) of history it is not yet at SAFAR level. Path to ~8/10: accumulate 3+ months of live history → `train_all` writes `backend/models/{xgboost,lgbm}_pm25.joblib + tft_pm25.pt` → ensemble switches from baseline to learned weights automatically.
+| Lead | Baseline MAE / RMSE | Persistence MAE | Category hit | r |
+|------|--------------------|-----------------|--------------|---|
+| ≤1 h (n=16,196) | 11.9 / 21.1 µg/m³ | **8.0** | 53% (persist 77%) | 0.74 |
+| 1–6 h (n=366) | 17.8 / 31.6 | 17.8 | 47% | — |
+| >6 h (n=105) | **36.4** / 86.0 | 36.7 | 39% | — |
+
+Reading it honestly: at ≤1 h, carry-forward is nearly unbeatable on smooth hourly air (true for every forecaster, including SAFAR's); the physics baseline pulls even by 1–6 h and edges ahead beyond 6 h. A 6-lag LightGBM probe on the same data already hits **MAE 7.2 vs 14.7 (mean-persistence), r = 0.83, n=4,921** — learning works; the full trainer (`scripts/train_models.py --force-sklearn`, ERA5 weather join, 100% coverage) holds releases to a stricter gate (must beat 1 h persistence, r > 0.2), which September-only data hasn't cleared yet (LGBM r=0.75, MAE +7%). When it clears, weights land in `backend/models/*.joblib`, the server hot-reloads them (daily auto-retrain, no restart), and the dashboard badge flips from `baseline` automatically.
+
+**Where the 17k rows live:** in `data/aqi_data.db` on the machine that runs the server — backfilled from OpenAQ (CPCB stations, 15-min raw → hourly means) via `python scripts/backfill_history.py --days 30`, plus live 5-min refreshes. The DB is gitignored (too big/regenerating); the repo ships the code, the backfill + training scripts, and the JSON reports — anyone can reproduce the data with an `OPENAQ_API_KEY`. Reference apps reading the same CPCB CAAQMS sensors: **CPCB SAMEER**, **SAFAR-Air (IITM Pune)**, **DPCC website**, **IQAir**, **aqi.in**. *Current* AQI should agree near-identically (±calibration); published Delhi 24 h PM2.5 RMSEs for trained systems are ~30–50 µg/m³, r ≈ 0.7–0.85. Honest score today: **~6/10** — live end-to-end system with disclosed skill and a self-improving loop; path to ~8/10 is winter-regime data, not new code.
 
 ## 🌍 Get a public (shareable) link
 
