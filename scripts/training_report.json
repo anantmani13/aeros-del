@@ -3,31 +3,31 @@
   "gbm_backend": "sklearn-histgbm",
   "xgboost_available": false,
   "stations": 54,
-  "readings": 14633,
+  "readings": 16976,
   "hourly_continuity": {
-    "consecutive_pairs": 14579,
-    "hourly_pairs": 14296,
+    "consecutive_pairs": 16922,
+    "hourly_pairs": 16607,
     "fraction": 0.981
   },
   "tft": {
     "trained": false,
     "reason": "skip: only 98% of pairs are hourly \u2014 TFT needs dense hourly sequences"
   },
-  "samples": 14193,
+  "samples": 16536,
   "holdout": {
-    "train_n": 11354,
-    "test_n": 2839,
+    "train_n": 13228,
+    "test_n": 3308,
     "persistence": {
-      "mae": 8.84,
-      "rmse": 15.24
+      "mae": 8.65,
+      "rmse": 14.92
     }
   },
   "lgbm": {
     "trained": true,
     "backend": "sklearn",
-    "model_mae": 9.12,
-    "model_rmse": 15.49,
-    "pearson_r": 0.752,
+    "model_mae": 9.3,
+    "model_rmse": 15.75,
+    "pearson_r": 0.747,
     "saved": false
   },
   "xgboost": {

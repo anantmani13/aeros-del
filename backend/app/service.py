@@ -463,6 +463,97 @@ class AQIService:
             "station_name": (station or {}).get("name", "Delhi NCR"),
         }
 
+    # ── Auto-retrain: data accumulates → weights teach themselves ──
+    # Checked cheaply on every refresh cycle; trains at most once/day and
+    # only when meaningful new history arrived. Same code + guardrails as
+    # scripts/train_models.py. No restart needed: weights hot-reload.
+
+    AUTO_TRAIN_MIN_INTERVAL_H = 24
+    AUTO_TRAIN_MIN_NEW_READINGS = 1500
+
+    async def maybe_auto_train(self) -> Dict[str, Any]:
+        """Trigger a background retrain if due. Cheap gate, never blocks."""
+        if getattr(self, "_auto_train_running", False):
+            return {"auto_train": "already-running"}
+        try:
+            state = self._auto_train_state()
+            import sqlite3
+            from datetime import datetime, timezone
+            db_path = str(PROJECT_ROOT / self.settings.database_path)
+            try:
+                con = sqlite3.connect(db_path)
+                current = con.execute(
+                    "SELECT COUNT(*) FROM station_readings").fetchone()[0]
+                con.close()
+            except Exception:
+                return {"auto_train": "no-db"}
+            now = datetime.now(timezone.utc)
+            last = state.get("last_attempt_iso")
+            age_h = 9999.0
+            if last:
+                try:
+                    age_h = ((now - datetime.fromisoformat(last))
+                             .total_seconds() / 3600.0)
+                except ValueError:
+                    pass
+            growth = current - int(state.get("readings_at_attempt", 0))
+            if (age_h >= self.AUTO_TRAIN_MIN_INTERVAL_H
+                    and growth >= self.AUTO_TRAIN_MIN_NEW_READINGS):
+                self._auto_train_running = True
+                asyncio.create_task(self._auto_train_job(current))
+                return {"auto_train": "started",
+                        "new_readings": growth}
+            return {"auto_train": "not-due",
+                    "age_h": round(age_h, 1), "new_readings": growth}
+        except Exception as e:
+            logger.debug("auto-train gate failed: %s", e)
+            return {"auto_train": "gate-error", "error": str(e)}
+
+    async def _auto_train_job(self, readings_now: int):
+        """Run training in background, hot-reload weights on success."""
+        import json
+        from datetime import datetime, timezone
+        try:
+            logger.info("Auto-train started (%d readings)", readings_now)
+            import scripts.train_models as tm
+            report = await tm.run_training(
+                db=self.settings.database_path, force_sklearn=True)
+            (PROJECT_ROOT / "scripts" / "training_report.json").write_text(
+                json.dumps(report, indent=2, default=str))
+            saved = bool((report.get("lgbm") or {}).get("saved")
+                         or (report.get("xgboost") or {}).get("saved"))
+            if saved:
+                self.ensemble._load_weights()  # hot-reload, no restart
+                logger.info("Auto-train SAVED weights — ensemble reloaded: %s",
+                            report.get("verdict"))
+            else:
+                logger.info("Auto-train refused: %s", report.get("verdict"))
+            self._write_auto_train_state({
+                "last_attempt_iso": datetime.now(timezone.utc).isoformat(),
+                "readings_at_attempt": readings_now,
+                "last_saved": saved,
+            })
+        except Exception as e:
+            logger.warning("Auto-train job failed: %s", e)
+        finally:
+            self._auto_train_running = False
+
+    def _auto_train_state(self) -> Dict[str, Any]:
+        import json
+        path = MODELS_DIR / ".auto_train.json"
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return {}
+
+    def _write_auto_train_state(self, state: Dict[str, Any]):
+        import json
+        try:
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            (MODELS_DIR / ".auto_train.json").write_text(json.dumps(state))
+        except Exception as e:
+            logger.debug("auto-train state write failed: %s", e)
+
     async def generate_alert_in_language(
         self, language: str = "en"
     ) -> Optional[Dict]:

@@ -112,15 +112,16 @@ def stats(errs):
     return {"mae": round(mae, 2), "rmse": round(rmse, 2)}
 
 
-async def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="data/aqi_data.db")
-    ap.add_argument("--min-samples", type=int, default=MIN_SAMPLES)
-    ap.add_argument("--force-sklearn", action="store_true",
-                    help="use sklearn HistGBM so weights load on Render free-tier")
-    args = ap.parse_args()
+async def run_training(db: str = "data/aqi_data.db",
+                       min_samples: int = MIN_SAMPLES,
+                       force_sklearn: bool = False) -> dict:
+    """Train + gate + (maybe) save ensemble weights. Returns report dict.
 
-    if args.force_sklearn:
+    Importable so the running server can auto-retrain itself
+    (see AQIService.maybe_auto_train) — same code, same guardrails.
+    """
+    from datetime import datetime, timezone
+    if force_sklearn:
         sys.modules["lightgbm"] = None  # force the sklearn fallback path
 
     try:
@@ -134,12 +135,15 @@ async def main():
     except ImportError:
         xgb_available = False
 
-    db = PROJECT_ROOT / args.db
+    db = PROJECT_ROOT / db
+    from datetime import datetime, timezone
     report = {"db": str(db), "gbm_backend": gbm_backend,
-              "xgboost_available": xgb_available}
+              "xgboost_available": xgb_available,
+              "generated_at": datetime.now(timezone.utc).isoformat()}
     if not db.exists():
-        print(f"No database at {db} — run the server first.")
-        sys.exit(1)
+        report["verdict"] = f"No database at {db} — run the server first."
+        print(report["verdict"])
+        return report
 
     series = load_readings(str(db))
     n_points = sum(len(v) for v in series.values())
@@ -154,30 +158,32 @@ async def main():
             if (b["timestamp"] - a["timestamp"]).total_seconds() / 3600 <= 2:
                 gaps_ok += 1
     dense_frac = (gaps_ok / gaps_all) if gaps_all else 0
+    all_ts = [p["timestamp"] for pts in series.values() for p in pts]
+    span_days = ((max(all_ts) - min(all_ts)).days if len(all_ts) > 1 else 0)
     report["hourly_continuity"] = {
         "consecutive_pairs": gaps_all,
         "hourly_pairs": gaps_ok,
         "fraction": round(dense_frac, 3),
+        "span_days": span_days,
     }
-    tft_note = ("skip: only {:.0%} of pairs are hourly — TFT needs dense "
-                "hourly sequences".format(dense_frac))
+    tft_note = ("deferred: {:.0%} hourly continuity but only {} days span — "
+                "TFT needs 4+ weeks of regime diversity".format(
+                    dense_frac, span_days))
     report["tft"] = {"trained": False, "reason": tft_note}
     print("TFT:", tft_note)
 
     samples = build_samples(series)
-    print(f"Training samples: {len(samples)} (need >={args.min_samples})")
+    print(f"Training samples: {len(samples)} (need >={min_samples})")
     report["samples"] = len(samples)
 
-    if len(samples) < args.min_samples:
+    if len(samples) < min_samples:
         report["verdict"] = (
-            f"REFUSED: {len(samples)} samples < {args.min_samples} minimum. "
+            f"REFUSED: {len(samples)} samples < {min_samples} minimum. "
             f"Keep the server running (hourly refresh) or deploy it, then re-run. "
             f"Rough target: 3-4 weeks of hourly data across 53 stations."
         )
         print("\n" + report["verdict"])
-        out = PROJECT_ROOT / "scripts" / "training_report.json"
-        out.write_text(json.dumps(report, indent=2, default=str))
-        sys.exit(0)
+        return report
 
     split = int(len(samples) * 0.8)
     tr, te = samples[:split], samples[split:]
@@ -197,9 +203,7 @@ async def main():
         report["verdict"] = (f"REFUSED: only {len(te)} test rows "
                              f"(need >={MIN_TEST_ROWS}).")
         print("\n" + report["verdict"])
-        out = PROJECT_ROOT / "scripts" / "training_report.json"
-        out.write_text(json.dumps(report, indent=2, default=str))
-        sys.exit(0)
+        return report
 
     saved = []
 
@@ -259,6 +263,18 @@ async def main():
         report["verdict"] = ("Models trained but did not beat persistence on "
                              "the holdout — nothing saved. More history needed.")
     print("\n" + report["verdict"])
+    return report
+
+
+async def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--db", default="data/aqi_data.db")
+    ap.add_argument("--min-samples", type=int, default=MIN_SAMPLES)
+    ap.add_argument("--force-sklearn", action="store_true",
+                    help="use sklearn HistGBM so weights load on Render free-tier")
+    args = ap.parse_args()
+    report = await run_training(db=args.db, min_samples=args.min_samples,
+                                force_sklearn=args.force_sklearn)
     out = PROJECT_ROOT / "scripts" / "training_report.json"
     out.write_text(json.dumps(report, indent=2, default=str))
     print(f"Report: {out}")

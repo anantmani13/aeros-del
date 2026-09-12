@@ -58,6 +58,12 @@ async def lifespan(app: FastAPI):
                         **snapshot,
                         "type": "update",
                     })
+                # Self-improving loop: retrains at most 1×/day once enough
+                # new history accumulated; weights hot-reload, no restart.
+                try:
+                    await app.state.service.maybe_auto_train()
+                except Exception as e:
+                    logger.debug("auto-train check failed: %s", e)
             except Exception as e:
                 logger.error("Background publish loop error: %s", e)
 
