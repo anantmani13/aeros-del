@@ -2,7 +2,7 @@
   "db": "C:\\Users\\Anant\\Desktop\\All Projects Btech\\SIH\\data\\aqi_data.db",
   "gbm_backend": "sklearn-histgbm",
   "xgboost_available": false,
-  "generated_at": "2026-09-12T06:50:14.387836+00:00",
+  "generated_at": "2026-09-12T07:15:43.993832+00:00",
   "stations": 54,
   "readings": 16976,
   "hourly_continuity": {
@@ -11,9 +11,18 @@
     "fraction": 0.981,
     "span_days": 29
   },
+  "tft_sequences": 476,
   "tft": {
-    "trained": false,
-    "reason": "deferred: 98% hourly continuity but only 29 days span \u2014 TFT needs 4+ weeks of regime diversity"
+    "trained": true,
+    "backend": "torch",
+    "h24_mae": 18.73,
+    "h24_rmse": 27.67,
+    "persist_h24_mae": 16.14,
+    "pearson_r_h24": 0.067,
+    "train_n": 380,
+    "test_n": 96,
+    "saved": false,
+    "verdict": "NOT saved \u2014 H+24 MAE 18.73 vs persist 16.14, r=0.067"
   },
   "samples": 16536,
   "fires": {

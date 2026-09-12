@@ -120,6 +120,120 @@ def load_fires(db_path):
     return out
 
 
+TFT_WINDOW = 72
+TFT_HORIZON = 72
+TFT_MIN_SEQS = 100
+
+
+def build_tft_sequences(series, window=TFT_WINDOW, horizon=TFT_HORIZON):
+    """Consecutive-hourly (window + horizon) sequences for TFT training.
+
+    5 features per hour (must match _TFTEncoderDecoder.INPUT_DIM_DEFAULT,
+    which load() rebuilds): [pm25, pm10, hour_sin, hour_cos, is_night].
+    Raw concentration scale (no normalization) to match _torch_predict,
+    which tiles raw history at inference time.
+    """
+    import math
+    seqs = []
+    for sid, pts in series.items():
+        # Split into consecutive-hourly runs (gap <= 1.5h)
+        runs, cur = [], [pts[0]] if pts else []
+        for p in pts[1:]:
+            gap = (p["timestamp"] - cur[-1]["timestamp"]).total_seconds() / 3600
+            if 0 < gap <= 1.5:
+                cur.append(p)
+            else:
+                runs.append(cur)
+                cur = [p]
+        if cur:
+            runs.append(cur)
+        for run in runs:
+            if len(run) < window + horizon:
+                continue
+            feats = []
+            ok = True
+            for p in run:
+                pol = p["pollutants"]
+                if pol.get("pm25") is None:
+                    ok = False
+                    break
+                hr = p["timestamp"].hour + p["timestamp"].minute / 60.0
+                feats.append([
+                    float(pol["pm25"]), float(pol.get("pm10") or 0.0),
+                    math.sin(2 * math.pi * hr / 24),
+                    math.cos(2 * math.pi * hr / 24),
+                    1.0 if (hr >= 19 or hr < 7) else 0.0,
+                ])
+            if not ok:
+                continue
+            import numpy as np
+            pm = [f[0] for f in feats]
+            for i in range(len(feats) - window - horizon + 1):
+                seqs.append({
+                    "station_id": sid,
+                    "end_time": run[i + window - 1]["timestamp"],
+                    "history": np.array(feats[i:i + window], dtype=float),
+                    "targets": [float(v) for v in
+                                pm[i + window:i + window + horizon]],
+                })
+    seqs.sort(key=lambda s: s["end_time"])
+    return seqs
+
+
+async def train_tft_gated(seqs, test_cap=250):
+    """Train TFT on first 80% (time), gate on 24h-ahead skill vs persistence.
+
+    Saves backend/models/tft_pm25.pt ONLY if 24h-ahead MAE beats
+    carry-forward persistence with r > 0.2 — the same honesty rule as
+    the tree models. A 72h model is fairly judged away from the 1h
+    horizon where persistence is near-optimal.
+    """
+    from backend.ml.transformer_forecaster import TFTForecaster
+    split = int(len(seqs) * 0.8)
+    tr, te = seqs[:split], seqs[split:]
+    te = te[:test_cap]
+    if len(te) < MIN_TEST_ROWS:
+        return {"trained": False, "saved": False,
+                "reason": f"only {len(te)} test seqs"}
+    fc = TFTForecaster(model_path=None)
+    rep = await fc.train(tr)
+    if not rep.get("trained"):
+        return {**rep, "saved": False}
+    errs, perrs, preds24, acts24 = [], [], [], []
+    for s in te:
+        hist = [float(v) for v in s["history"][:, 0]]
+        cur = hist[-1]
+        try:
+            out = fc._torch_predict(hist, cur, TFT_HORIZON)
+        except Exception:
+            continue
+        actual = float(s["targets"][23])
+        errs.append(out[23] - actual)
+        perrs.append(cur - actual)
+        preds24.append(out[23])
+        acts24.append(actual)
+    if not errs:
+        return {"trained": True, "saved": False, "reason": "eval failed"}
+    m, p = stats(errs), stats(perrs)
+    r = round(pearson(preds24, acts24), 3)
+    out = {"trained": True, "backend": "torch",
+           "h24_mae": m["mae"], "h24_rmse": m["rmse"],
+           "persist_h24_mae": p["mae"], "pearson_r_h24": r,
+           "train_n": len(tr), "test_n": len(te), "saved": False}
+    if m["mae"] < p["mae"] and r > MIN_R:
+        import torch
+        MODELS = PROJECT_ROOT / "backend" / "models"
+        MODELS.mkdir(parents=True, exist_ok=True)
+        torch.save(fc._model.state_dict(), str(MODELS / "tft_pm25.pt"))
+        out.update({"saved": True, "path": "backend/models/tft_pm25.pt"})
+        out["verdict"] = (f"SAVED tft_pm25.pt — H+24 MAE {m['mae']} vs "
+                          f"persist {p['mae']}, r={r}")
+    else:
+        out["verdict"] = (f"NOT saved — H+24 MAE {m['mae']} vs persist "
+                          f"{p['mae']}, r={r}")
+    return out
+
+
 def fire_summary_at(fires, end_ts, window_h=48):
     """Fires in the 48h before a sample: count, FRP, nearest.
 
@@ -263,11 +377,27 @@ async def run_training(db: str = "data/aqi_data.db",
         "fraction": round(dense_frac, 3),
         "span_days": span_days,
     }
-    tft_note = ("deferred: {:.0%} hourly continuity but only {} days span — "
-                "TFT needs 4+ weeks of regime diversity".format(
-                    dense_frac, span_days))
-    report["tft"] = {"trained": False, "reason": tft_note}
-    print("TFT:", tft_note)
+    try:
+        import torch  # noqa: F401
+        torch_available = True
+    except ImportError:
+        torch_available = False
+    seqs = build_tft_sequences(series)
+    print(f"TFT sequences (72h->72h): {len(seqs)} (need >={TFT_MIN_SEQS})"
+          f" | torch: {'yes' if torch_available else 'no'}")
+    report["tft_sequences"] = len(seqs)
+    if len(seqs) < TFT_MIN_SEQS:
+        tft_note = (f"deferred: {len(seqs)} sequences < {TFT_MIN_SEQS}; "
+                    f"{dense_frac:.0%} hourly over {span_days}d span")
+        report["tft"] = {"trained": False, "reason": tft_note}
+        print("TFT:", tft_note)
+    elif not torch_available:
+        tft_note = "deferred: torch not installed (local/full image only)"
+        report["tft"] = {"trained": False, "reason": tft_note}
+        print("TFT:", tft_note)
+    else:
+        report["tft"] = await train_tft_gated(seqs)
+        print("TFT:", report["tft"].get("verdict", report["tft"]))
 
     wx, wx_fetched, wx_cov = None, False, 0.0
     if use_weather:

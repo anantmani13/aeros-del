@@ -96,7 +96,8 @@ class TFTForecaster:
                              dtype=torch.float32).unsqueeze(-1)
 
             for _ in range(12):
-                pred = model(X)
+                # Plain wrapper class (not nn.Module) — no __call__.
+                pred = model.forward(X)
                 loss = loss_fn(pred, y)
                 optimizer.zero_grad()
                 loss.backward()
@@ -320,11 +321,16 @@ class _TFTEncoderDecoder:
                 yield m
 
     def parameters(self):
-        import torch
-        for m in self._module_list:
-            if hasattr(m, "parameters") and m is not self.attention:
-                pass
-        return self.embed.parameters()
+        # Every module must train — the old version returned ONLY the
+        # embedding parameters, so attention/LSTM/head silently never
+        # learned (a real bug on the DL training path).
+        import itertools
+        return itertools.chain(
+            self.embed.parameters(),
+            self.attention.parameters(),
+            self.decoder.parameters(),
+            self.head.parameters(),
+        )
 
     def state_dict(self):
         return {
