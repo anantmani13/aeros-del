@@ -193,17 +193,24 @@ class OpenAQClient:
         self._cache[key] = value
         self._cache_timestamps[key] = time.time()
 
-    async def get_locations_in_delhi(self) -> List[Dict]:
+    async def get_locations_in_delhi(
+        self, force_fresh: bool = False,
+    ) -> List[Dict]:
         """
         Fetch all monitoring locations in Delhi NCR bounding box.
+
+        Args:
+            force_fresh: Skip the in-memory cache and hit the API
+                (manual refresh must always fetch live data).
 
         Returns:
             List of location dicts with id, name, coordinates, parameters
         """
         cache_key = "locations_delhi"
-        cached = self._get_cached(cache_key)
-        if cached:
-            return cached
+        if not force_fresh:
+            cached = self._get_cached(cache_key)
+            if cached:
+                return cached
 
         params = {
             "bbox": (f"{self.bbox['lon_min']},{self.bbox['lat_min']},"
@@ -260,21 +267,25 @@ class OpenAQClient:
     async def get_latest_measurements(
         self,
         location_id: Optional[int] = None,
+        force_fresh: bool = False,
     ) -> List[StationReading]:
         """
         Fetch latest measurements for Delhi NCR stations.
 
         Args:
             location_id: Specific location ID, or None for all Delhi NCR
+            force_fresh: Skip the in-memory cache and hit the API
+                (manual refresh must always fetch live data).
 
         Returns:
             List of StationReading objects
         """
         if location_id:
             cache_key = f"latest_{location_id}"
-            cached = self._get_cached(cache_key)
-            if cached:
-                return cached
+            if not force_fresh:
+                cached = self._get_cached(cache_key)
+                if cached:
+                    return cached
 
             data = await self._rate_limited_request(
                 f"locations/{location_id}/latest"
@@ -285,11 +296,13 @@ class OpenAQClient:
 
         # Fetch all Delhi NCR
         cache_key = "latest_all_delhi"
-        cached = self._get_cached(cache_key)
-        if cached:
-            return cached
+        if not force_fresh:
+            cached = self._get_cached(cache_key)
+            if cached:
+                return cached
 
-        locations = await self.get_locations_in_delhi()
+        locations = await self.get_locations_in_delhi(
+            force_fresh=force_fresh)
 
         # Only locations that actually measure PM — limits API calls and
         # skips stations without the pollutants we model.

@@ -155,7 +155,9 @@ class AQIService:
 
         async with self._lock:
             try:
-                await self._collect_raw_data()
+                # A forced (manual) refresh must hit OpenAQ live — never
+                # serve the 5-minute in-memory cache as "latest".
+                await self._collect_raw_data(force_fresh=force)
                 await self._compute_physics()
                 await self._build_station_snapshots()
                 await self._compute_forecasts()
@@ -173,9 +175,10 @@ class AQIService:
     # Pipeline steps
     # ────────────────────────────────────────────────────────────────
 
-    async def _collect_raw_data(self):
+    async def _collect_raw_data(self, force_fresh: bool = False):
         """Fetch readings, weather, fires, and persist to SQLite."""
-        readings = await self._safe(self.openaq.get_latest_measurements())
+        readings = await self._safe(self.openaq.get_latest_measurements(
+            force_fresh=force_fresh))
         mapped = self._match_readings(readings or [])
 
         # WAQI fallback: fill stations OpenAQ missed (capped per cycle).
@@ -684,13 +687,39 @@ class AQIService:
     # Internals
     # ────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _reading_age_hours(timestamp_iso: Optional[str],
+                           now: Optional[datetime] = None) -> Optional[float]:
+        """Age of a reading timestamp in hours (None when unparseable)."""
+        if not timestamp_iso:
+            return None
+        try:
+            ts = datetime.fromisoformat(
+                str(timestamp_iso).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ref = now or datetime.now(timezone.utc)
+            return max(0.0, (ref - ts).total_seconds() / 3600.0)
+        except (ValueError, TypeError):
+            return None
+
     def _station_payload(self, record: Dict) -> Dict:
         pollutants = record.get("pollutants", {})
         result = self.naqi.calculate_naqi(pollutants)
+        # Freshness: CPCB sensors via OpenAQ can stall for hours/days while
+        # /latest keeps returning the same old measurement. Flag it so the
+        # UI can show a "last updated + STALE" badge instead of pretending
+        # the AQI is live.
+        age_h = self._reading_age_hours(record.get("timestamp"))
+        stale_after = float(
+            getattr(self.settings, "stale_after_hours", 6) or 6)
         return {
             "station_id": record.get("station_id"),
             "station_name": record.get("station_name"),
             "timestamp": record.get("timestamp"),
+            "age_hours": round(age_h, 1) if age_h is not None else None,
+            "stale": bool(age_h is not None and age_h > stale_after),
+            "stale_after_h": stale_after,
             "pollutants": pollutants,
             "aqi": result.overall_aqi,
             "category": result.category,

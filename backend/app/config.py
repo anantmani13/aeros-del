@@ -40,6 +40,9 @@ class Settings:
 
     # ── Data Pipeline ─────────────────────────────────────────────────
     data_refresh_interval: int = 300  # seconds
+    # A station reading older than this (hours) is flagged stale —
+    # CPCB via OpenAQ normally lags 1–3h; beyond this the feed has stalled.
+    stale_after_hours: float = 6.0
     database_path: str = "data/aqi_data.db"
     demo_mode: bool = False
     # When True, policy alerts are optionally rephrased by Gemini.
@@ -110,6 +113,7 @@ class Settings:
             port=int(os.getenv("PORT", "8000")),
             debug=os.getenv("DEBUG", "false").lower() == "true",
             data_refresh_interval=int(os.getenv("DATA_REFRESH_INTERVAL", "300")),
+            stale_after_hours=float(os.getenv("STALE_AFTER_HOURS", "6")),
             database_path=os.getenv("DATABASE_PATH", "data/aqi_data.db"),
             demo_mode=os.getenv("DEMO_MODE", "false").lower() == "true",
             llm_enhanced=os.getenv("LLM_ENHANCED", "false").lower() == "true",

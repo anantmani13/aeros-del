@@ -62,6 +62,19 @@
     return d.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
   }
 
+  function fmtAge(iso) {
+    if (!iso) return '—';
+    const ms = Date.now() - new Date(iso).getTime();
+    if (Number.isNaN(ms)) return '—';
+    if (ms < 0) return 'just now';
+    const m = Math.floor(ms / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 48) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  }
+
   function esc(text) {
     const div = document.createElement('div');
     div.textContent = String(text == null ? '' : text);
@@ -90,6 +103,7 @@
     wsUrl,
     fmtTime,
     fmtDT,
+    fmtAge,
     esc,
     clamp,
     debounce,

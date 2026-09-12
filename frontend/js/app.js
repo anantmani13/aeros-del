@@ -72,13 +72,21 @@
     _wireControls() {
       document.getElementById('btnRefresh').addEventListener('click', () => {
         const st = document.getElementById('mapStatus');
-        if (st) st.textContent = 'refresh requested — pipeline running…';
+        if (st) st.textContent = 'refreshing live data from OpenAQ…';
         if (this.live && this.live.socket && this.live.socket.readyState === 1) {
+          // Server force-refreshes (bypasses caches) and broadcasts the
+          // new snapshot, which re-renders via onServerMessage.
           this.live.send('refresh');
         } else {
-          Utils.fetchJSON('/api/v1/forecast/trigger?force=true').then((r) => {
-            if (r.refreshed) console.log('Refresh triggered', r.last_update);
-          });
+          // WebSocket down: trigger via REST, then pull the fresh
+          // snapshot ourselves (the old code fired the trigger and never
+          // re-rendered, so the button appeared to do nothing).
+          Utils.fetchJSON('/api/v1/forecast/trigger?force=true', { method: 'POST' })
+            .then(() => Utils.fetchJSON('/api/v1/snapshot'))
+            .then((snap) => this.onSnapshot(snap))
+            .catch((err) => {
+              if (st) st.textContent = `manual refresh failed — ${err.message}`;
+            });
         }
       });
 
@@ -435,13 +443,23 @@
           const color = c.color || '#808080';
           const sel = this.state.selectedStation === s.id ? 'selected' : '';
           const histN = s.history_count != null ? s.history_count : ((s.history || []).length);
-          const stale = histN < 6 ? ' · only ' + histN + ' pts' : ' · ' + histN + ' pts';
+          const histTxt = histN < 6 ? ' · only ' + histN + ' pts' : ' · ' + histN + ' pts';
+          // Last-updated age proves the data is actually fresh after a
+          // manual refresh; STALE chip when the CPCB feed via OpenAQ has
+          // stalled (reading older than the backend threshold).
+          const ageTxt = c.timestamp ? Utils.fmtAge(c.timestamp) : '';
+          const freshTxt = c.timestamp
+            ? ` · upd ${Utils.fmtTime(c.timestamp)}${ageTxt && ageTxt !== '—' ? ` (${ageTxt})` : ''}`
+            : '';
+          const staleChip = c.stale
+            ? ` <span class="stale-chip" title="Sensor feed stalled — last reading ${Utils.esc(ageTxt)}">STALE</span>`
+            : '';
           return `
             <div class="station-row ${sel}" style="--row-color:${color}" data-id="${Utils.esc(s.id)}">
               <span class="dot-ind"></span>
               <div class="meta">
                 <div class="name">${Utils.esc(s.short_name || s.name)}</div>
-                <div class="zone">${Utils.esc(c.category || '—')} · ${Utils.esc(c.timestamp ? Utils.fmtTime(c.timestamp) : '')}${Utils.esc(stale)}</div>
+                <div class="zone">${Utils.esc(c.category || '—')}${Utils.esc(freshTxt)}${Utils.esc(histTxt)}${staleChip}</div>
               </div>
               <span class="aqi">${c.aqi != null ? c.aqi : '—'}</span>
             </div>`;

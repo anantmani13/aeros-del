@@ -43,11 +43,14 @@ async def current_radiation(request: Request):
 
 
 @router.post("/forecast/trigger")
+@router.get("/forecast/trigger")
 async def trigger_forecast(request: Request):
     """
     Manually trigger a full refresh cycle (data → physics → ML → NLP).
 
     Optionally passes `force=false` to respect the polling interval.
+    Accepts GET as well as POST (the dashboard refresh button uses GET
+    when the WebSocket is unreachable).
     """
     service = _get_service(request)
     force = (request.query_params.get("force", "true").lower() != "false")
