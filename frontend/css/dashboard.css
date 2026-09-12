@@ -168,9 +168,30 @@
   line-height: 1.5;
   color: var(--text-mid);
 }
-/* Brighter basemap: CARTO dark_all is near-black; lift labels/roads
-   without washing out the heatmap. */
-#map .maplibregl-canvas { filter: brightness(1.35) contrast(1.08) saturate(0.92); }
+/* Brighten ONLY the dark basemap (the light one needs no help).
+   Body dataset is set by map.js (default light = readable). */
+body[data-basemap="dark"] #map .maplibregl-canvas {
+  filter: brightness(1.35) contrast(1.08) saturate(0.92);
+}
+/* Never pure black while tiles load or when blocked. */
+#map { background: #1a2140; }
+/* Basemap Dark/Light switch */
+.base-toggle { display: flex; gap: 4px; margin-top: 4px; }
+.base-toggle button {
+  flex: 1;
+  font-size: 11px; font-weight: 700;
+  padding: 3px 0;
+  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.base-toggle button.active {
+  color: var(--electric);
+  border-color: var(--electric);
+  background: rgba(0,212,255,0.12);
+}
 /* Dark-style map controls (default white buttons glared on dark map). */
 .maplibregl-ctrl-group {
   background: rgba(10,14,39,0.85) !important;

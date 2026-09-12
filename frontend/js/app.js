@@ -110,6 +110,16 @@
       toggleMap('plumes', 'layPlumes');
       toggleMap('stations', 'layStations');
 
+      // Basemap Dark/Light switch (default Light = readable).
+      document.querySelectorAll('[data-base-btn]').forEach((btn) => {
+        if (this.map && this.map.baseStyle) {
+          btn.classList.toggle('active', btn.dataset.baseBtn === this.map.baseStyle);
+        }
+        btn.addEventListener('click', () => {
+          if (this.map) this.map.setBasemap(btn.dataset.baseBtn);
+        });
+      });
+
       // Station search (filters the rendered rows only)
       const searchEl = document.getElementById('stationSearch');
       if (searchEl) {

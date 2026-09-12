@@ -6,11 +6,30 @@
   'use strict';
 
   const DELHI_CENTER = [77.2090, 28.6139];
-  const CARTO_TILES = ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'];
-  const CARTO_ATTR = '© CARTO';
+  // Readable first: 'light' (Voyager) is the default because dark_all is
+  // near-black on many laptop screens. Users can switch anytime; the
+  // choice persists in localStorage.
+  const BASE_STYLES = {
+    light: {
+      tiles: ['https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'],
+      attr: '© OpenStreetMap contributors © CARTO',
+    },
+    dark: {
+      tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
+      attr: '© OpenStreetMap contributors © CARTO',
+    },
+  };
 
   function maptilerTiles(key) {
     return [`https://api.maptiler.com/maps/darkmatter/{z}/{x}/{y}.png?key=${key}`];
+  }
+
+  function savedBasemap() {
+    try {
+      const v = localStorage.getItem('aeros-basemap');
+      if (v === 'dark' || v === 'light') return v;
+    } catch (e) { /* private mode */ }
+    return 'light';
   }
   const FIRE_REGIONS = [
     { name: 'Punjab', colors: '#ff3838', lat: 30.8, lon: 75.4 },
@@ -23,12 +42,17 @@
       this.onStationClick = null;
       this.currentHour = 0;
       this._forecasts = {};
-      // Better alternative: use the premium MapTiler dark basemap when a
-      // key is configured, otherwise fall back to free CARTO tiles.
-      const tiles = maptilerKey ? maptilerTiles(maptilerKey) : CARTO_TILES;
-      const attribution = maptilerKey
-        ? '© MapTiler © OpenStreetMap contributors'
-        : CARTO_ATTR;
+      // Basemap: saved choice (default light = readable). MapTiler key,
+      // when configured, upgrades the dark style only.
+      this.baseStyle = savedBasemap();
+      document.body.dataset.basemap = this.baseStyle;
+      let tiles = BASE_STYLES[this.baseStyle].tiles;
+      let attribution = BASE_STYLES[this.baseStyle].attr;
+      if (maptilerKey && this.baseStyle === 'dark') {
+        tiles = maptilerTiles(maptilerKey);
+        attribution = '© MapTiler © OpenStreetMap contributors';
+      }
+      this._maptilerKey = maptilerKey || null;
       this.map = new maplibregl.Map({
         container: this.container,
         style: {
@@ -55,7 +79,51 @@
       this.map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'bottom-right');
       this.map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
+      // If tiles are blocked (offline venue, firewall), say so instead of
+      // showing a black rectangle — dots + labels still work on the
+      // fallback background.
+      this.map.on('error', (e) => {
+        const src = (e && e.sourceId) || '';
+        if (src === 'base') {
+          const el = document.getElementById('mapStatus');
+          if (el) el.textContent = 'basemap tiles blocked (offline?) — stations still live';
+        }
+      });
+
       this.map.on('load', () => this._onLoad());
+    }
+
+    setBasemap(name) {
+      if (!BASE_STYLES[name]) return;
+      this.baseStyle = name;
+      try { localStorage.setItem('aeros-basemap', name); } catch (e) { /* ignore */ }
+      document.body.dataset.basemap = name;
+      document.querySelectorAll('[data-base-btn]').forEach((b) => {
+        b.classList.toggle('active', b.dataset.baseBtn === name);
+      });
+      if (!this.map.isStyleLoaded()) return;
+      let tiles = BASE_STYLES[name].tiles;
+      let attribution = BASE_STYLES[name].attr;
+      if (this._maptilerKey && name === 'dark') {
+        tiles = maptilerTiles(this._maptilerKey);
+        attribution = '© MapTiler © OpenStreetMap contributors';
+      }
+      // Re-add raster at the bottom (before the heat layer when present).
+      if (this.map.getLayer('base')) this.map.removeLayer('base');
+      if (this.map.getSource('base')) this.map.removeSource('base');
+      this.map.addSource('base', {
+        type: 'raster', tiles: tiles, tileSize: 256, attribution: attribution,
+      });
+      const before = this.map.getLayer('pm25-heat') ? 'pm25-heat' : undefined;
+      this.map.addLayer({ id: 'base', type: 'raster', source: 'base' }, before);
+      // Keep place labels legible on either basemap.
+      if (this.map.getLayer('station-labels')) {
+        const dark = name === 'dark';
+        this.map.setPaintProperty('station-labels', 'text-color',
+          dark ? 'rgba(255,255,255,0.88)' : 'rgba(16,20,46,0.92)');
+        this.map.setPaintProperty('station-labels', 'text-halo-color',
+          dark ? 'rgba(5,8,25,0.9)' : 'rgba(255,255,255,0.85)');
+      }
     }
 
     _onLoad() {
@@ -129,8 +197,10 @@
           'text-ignore-placement': false,
         },
         paint: {
-          'text-color': 'rgba(255,255,255,0.88)',
-          'text-halo-color': 'rgba(5,8,25,0.9)',
+          'text-color': this.baseStyle === 'dark'
+            ? 'rgba(255,255,255,0.88)' : 'rgba(16,20,46,0.92)',
+          'text-halo-color': this.baseStyle === 'dark'
+            ? 'rgba(5,8,25,0.9)' : 'rgba(255,255,255,0.85)',
           'text-halo-width': 1.4,
         },
       });
