@@ -22,6 +22,7 @@ from backend.app.config import Settings, PROJECT_ROOT, DATA_DIR, MODELS_DIR
 
 from backend.data.openaq_client import OpenAQClient
 from backend.data.waqi_client import WAQIClient
+from backend.data.cams_client import CAMSClient
 from backend.data.weather_client import WeatherClient
 from backend.data.fire_client import FireClient
 from backend.data.naqi_calculator import NAQICalculator
@@ -60,6 +61,9 @@ class AQIService:
         # cycle so the free-token rate limit never stalls refreshes).
         self.waqi = WAQIClient(api_key=self.settings.waqi_api_key)
         self.waqi_fill_cap = 8
+        # Keyless CAMS nowcast: keeps stations live when the CPCB
+        # observation feed stalls upstream (model values, labeled cams).
+        self.cams = CAMSClient()
         self.weather = WeatherClient()
         self.fire = FireClient(api_key=self.settings.nasa_firms_api_key)
         self.naqi = NAQICalculator()
@@ -177,9 +181,18 @@ class AQIService:
 
     async def _collect_raw_data(self, force_fresh: bool = False):
         """Fetch readings, weather, fires, and persist to SQLite."""
+        try:
+            stale_after = float(self.settings.stale_after_hours or 6)
+        except (TypeError, ValueError):
+            stale_after = 6.0
+
         readings = await self._safe(self.openaq.get_latest_measurements(
             force_fresh=force_fresh))
-        mapped = self._match_readings(readings or [])
+        # Fresh-first matching: a live private monitor beats a
+        # correctly-named but day-old official one (Sept 2026: name
+        # anchoring alone pinned every station to 33h-stale CPCB data).
+        mapped = self._match_readings(readings or [],
+                                      fresh_within_h=stale_after)
 
         # WAQI fallback: fill stations OpenAQ missed (capped per cycle).
         # Only fires when a key exists AND some stations are still dark.
@@ -199,6 +212,37 @@ class AQIService:
         if waqi_filled:
             logger.info("WAQI fallback filled %d stations", waqi_filled)
         self.state["waqi_filled"] = waqi_filled
+
+        # CAMS live-model fallback (keyless): any station OpenAQ left
+        # missing or older than the staleness gate gets a current-hour
+        # CAMS nowcast, labeled source="cams". Model values are
+        # display-only — never persisted as observed history (see the
+        # store_readings call below).
+        need_cams = []
+        for station in self.stations:
+            entry = mapped.get(station["id"])
+            age = (self._reading_age_hours(entry.get("timestamp"))
+                   if entry else None)
+            if entry is None or age is None or age > stale_after:
+                need_cams.append(station)
+        cams_filled = 0
+        if need_cams:
+            batch = await self._safe(self.cams.get_current_batch(
+                {s["id"]: (s["latitude"], s["longitude"])
+                 for s in need_cams})) or {}
+            for station in need_cams:
+                datum = batch.get(station["id"])
+                if datum and datum.get("pollutants"):
+                    mapped[station["id"]] = {
+                        "pollutants": datum["pollutants"],
+                        "timestamp": datum["timestamp"],
+                        "source": "cams",
+                    }
+                    cams_filled += 1
+        if cams_filled:
+            logger.info("CAMS live-model fallback filled %d stations",
+                        cams_filled)
+        self.state["cams_filled"] = cams_filled
 
         # Fall back to demo generation when no stations resolved
         if not mapped:
@@ -230,7 +274,10 @@ class AQIService:
             }
             records.append(record)
 
-        await self._safe(self.preprocessor.store_readings(records))
+        # Persist observations only — CAMS model nowcasts must never
+        # pollute the observed history that trains the ML models.
+        await self._safe(self.preprocessor.store_readings(
+            [r for r in records if r.get("source") != "cams"]))
         self.state["raw_records"] = records
 
         # Weather (Delhi center)
@@ -625,6 +672,7 @@ class AQIService:
             "fire_count": len(self.state.get("fires", [])),
             "data_source": self.state.get("data_source"),
             "waqi_filled": self.state.get("waqi_filled", 0),
+            "cams_filled": self.state.get("cams_filled", 0),
         }
 
     # ────────────────────────────────────────────────────────────────
@@ -788,17 +836,41 @@ class AQIService:
                     out.append(tok)
         return out
 
-    def _match_readings(self, readings: List[Any]) -> Dict[str, Dict]:
+    def _match_readings(self, readings: List[Any],
+                          fresh_within_h: Optional[float] = None
+                          ) -> Dict[str, Dict]:
         """Map OpenAQ readings to station metadata.
 
         Name-anchored first (an OpenAQ location whose name shares a token
         with our station wins regardless of distance), nearest-proximity
         fallback within 25 km. Fixes identical readings copied across
         neighbouring stations (e.g. ITO vs Mandir Marg).
+
+        When fresh_within_h is set, readings newer than that win first:
+        stations match the fresh pool, and only stations with no fresh
+        monitor nearby fall back to older readings (flagged stale
+        downstream). Without this, a correctly-named but day-old official
+        monitor beats a nearby live sensor on anchor alone.
         """
         if not readings:
             return {}
+        if fresh_within_h is not None:
+            fresh = [
+                r for r in readings
+                if (self._reading_age_hours(getattr(r, "timestamp", None))
+                    or float("inf")) <= fresh_within_h
+            ]
+            if fresh:
+                matched = self._match_pool(fresh)
+                if len(matched) >= len(self.stations):
+                    return matched
+                for sid, entry in self._match_pool(readings).items():
+                    matched.setdefault(sid, entry)
+                return matched
+        return self._match_pool(readings)
 
+    def _match_pool(self, readings: List[Any]) -> Dict[str, Dict]:
+        """Match one pool of readings to stations (see _match_readings)."""
         mapped = {}
         for station in self.stations:
             lat, lon = station["latitude"], station["longitude"]
@@ -967,5 +1039,6 @@ class AQIService:
         """Close all HTTP clients."""
         await self._safe(self.openaq.close())
         await self._safe(self.waqi.close())
+        await self._safe(self.cams.close())
         await self._safe(self.weather.close())
         await self._safe(self.fire.close())

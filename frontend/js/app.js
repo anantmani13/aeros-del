@@ -454,12 +454,16 @@
           const staleChip = c.stale
             ? ` <span class="stale-chip" title="Sensor feed stalled — last reading ${Utils.esc(ageTxt)}">STALE</span>`
             : '';
+          // CAMS rows are live model nowcasts (observation feed stalled),
+          // not sensor readings — say so inline.
+          const srcTag = (c.source || '').indexOf('cams') === 0
+            ? ' · CAMS model' : '';
           return `
             <div class="station-row ${sel}" style="--row-color:${color}" data-id="${Utils.esc(s.id)}">
               <span class="dot-ind"></span>
               <div class="meta">
                 <div class="name">${Utils.esc(s.short_name || s.name)}</div>
-                <div class="zone">${Utils.esc(c.category || '—')}${Utils.esc(freshTxt)}${Utils.esc(histTxt)}${staleChip}</div>
+                <div class="zone">${Utils.esc(c.category || '—')}${Utils.esc(freshTxt)}${Utils.esc(histTxt)}${Utils.esc(srcTag)}${staleChip}</div>
               </div>
               <span class="aqi">${c.aqi != null ? c.aqi : '—'}</span>
             </div>`;

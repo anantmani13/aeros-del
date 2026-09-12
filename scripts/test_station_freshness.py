@@ -17,7 +17,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.app.service import AQIService
-from backend.data.openaq_client import OpenAQClient
+from backend.data.cams_client import CAMSClient
+from backend.data.openaq_client import OpenAQClient, StationReading
 
 
 def check(name, cond, extra=""):
@@ -154,7 +155,131 @@ async def main():
                 "999001" in got_ids and "999002" in got_ids,
                 f"got {sorted(got_ids)}")
 
+    # 5. fresh-first matching --------------------------------------------
+    svc.stations = [{
+        "id": "t-rkp", "name": "R K Puram, Delhi - DPCC",
+        "short_name": "R K Puram", "latitude": 28.5632, "longitude": 77.1869,
+    }]
+    old_ts = (now - timedelta(hours=33)).isoformat()
+    new_ts = (now - timedelta(minutes=30)).isoformat()
+    stale_official = StationReading(
+        station_id="17", station_name="R K Puram, Delhi - DPCC",
+        latitude=28.5632, longitude=77.1869, timestamp=old_ts,
+        pollutants={"pm25": 120.0, "pm10": 200.0}, source="openaq")
+    fresh_private = StationReading(
+        station_id="4712609", station_name="Air Check",
+        latitude=28.6000, longitude=77.2200, timestamp=new_ts,
+        pollutants={"pm25": 45.0, "pm10": 80.0}, source="openaq")
+    m_fresh = svc._match_readings([stale_official, fresh_private],
+                                  fresh_within_h=6)
+    ok &= check("fresh beats anchored-stale",
+                m_fresh.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 45.0,
+                f"got {m_fresh.get('t-rkp', {}).get('pollutants')}")
+    m_legacy = svc._match_readings([stale_official, fresh_private])
+    ok &= check("legacy path keeps anchor behavior",
+                m_legacy.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 120.0,
+                f"got {m_legacy.get('t-rkp', {}).get('pollutants')}")
+    # No fresh monitor nearby -> stale fallback still matches (flagged stale).
+    m_only_stale = svc._match_readings([stale_official], fresh_within_h=6)
+    ok &= check("stale fallback when nothing fresh",
+                m_only_stale.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 120.0,
+                f"got {m_only_stale.get('t-rkp')}")
+
+    # 6. CAMS parse: latest slot <= now, co µg/m³ -> mg/m³ ----------------
+    cams = CAMSClient()
+    real_now = datetime.now(timezone.utc).replace(minute=0, second=0,
+                                                 microsecond=0)
+    def _slot(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M")
+    canned = {"hourly": {
+        "time": [_slot(real_now - timedelta(hours=2)),
+                 _slot(real_now - timedelta(hours=1)),
+                 _slot(real_now + timedelta(hours=1))],
+        "pm2_5": [50.0, 44.0, 40.0],
+        "pm10": [90.0, 80.0, 75.0],
+        "nitrogen_dioxide": [20.0, 18.0, 17.0],
+        "sulphur_dioxide": [8.0, 7.0, 7.0],
+        "ozone": [60.0, 55.0, 50.0],
+        "carbon_monoxide": [400.0, 500.0, 600.0],
+    }}
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return canned
+
+    class _FakeHttp:
+        async def get(self, url, params=None):
+            return _FakeResp()
+
+    cams._http_client = _FakeHttp()
+    datum = await cams.get_current_aq(28.56, 77.18)
+    ok &= check("cams picks slot <= now",
+                datum is not None and datum["pollutants"].get("pm25") == 44.0,
+                f"got {datum}")
+    ok &= check("cams co converted to mg/m³",
+                datum is not None and datum["pollutants"].get("co") == 0.5,
+                f"got {(datum or {}).get('pollutants', {}).get('co')}")
+    ok &= check("cams labeled + timestamped",
+                datum is not None and datum.get("source") == "cams"
+                and datum.get("timestamp", "").endswith("+00:00"),
+                f"got {datum}")
+
+    # 7. CAMS override wiring: stale observed -> live model display,
+    #    model values never persisted -----------------------------------
+    svc2 = AQIService()
+    svc2.stations = [{
+        "id": "t1", "name": "Test Station", "short_name": "Test",
+        "latitude": 28.56, "longitude": 77.18, "city": "Delhi",
+        "zone": "Test", "type": "Test", "elevation_m": 0,
+    }]
+    svc2.settings.waqi_api_key = None  # isolate CAMS path
+    svc2.settings.stale_after_hours = 6.0
+
+    async def fake_latest_measurements(force_fresh=False):
+        return [StationReading(
+            station_id="17", station_name="Far Official",
+            latitude=28.56, longitude=77.18,
+            timestamp=(datetime.now(timezone.utc)
+                       - timedelta(hours=33)).isoformat(),
+            pollutants={"pm25": 120.0, "pm10": 200.0}, source="openaq")]
+
+    async def fake_cams_batch(coords):
+        return {"t1": {
+            "pollutants": {"pm25": 40.0, "pm10": 70.0},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cams"}}
+
+    stored = []
+
+    async def fake_store(records):
+        stored.extend(records)
+
+    svc2.openaq.get_latest_measurements = fake_latest_measurements
+    svc2.cams.get_current_batch = fake_cams_batch
+    svc2.preprocessor.store_readings = fake_store
+    svc2.weather.get_current_weather = lambda *a: asyncio.sleep(0, result={})
+    svc2.fire.get_active_fires = lambda *a, **k: asyncio.sleep(0, result=[])
+    await svc2._collect_raw_data()
+    cur = {r["station_id"]: r for r in svc2.state.get("raw_records", [])}["t1"]
+    ok &= check("stale observed replaced by cams in snapshot",
+                cur.get("source") == "cams"
+                and cur.get("pollutants", {}).get("pm25") == 40.0,
+                f"got {cur.get('source')} {cur.get('pollutants')}")
+    ok &= check("cams values not persisted",
+                all(r.get("source") != "cams" for r in stored),
+                f"stored {len(stored)} records")
+    ok &= check("cams_filled counted",
+                svc2.state.get("cams_filled") == 1,
+                f"got {svc2.state.get('cams_filled')}")
+
     await svc.close()
+    await svc2.close()
+    await client.close()
+    await client2.close()
+    await client3.close()
+    await cams.close()
 
     print("\nALL PASS" if ok else "\nSOME FAILURES")
     return ok
