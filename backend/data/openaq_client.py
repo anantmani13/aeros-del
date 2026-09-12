@@ -413,41 +413,45 @@ class OpenAQClient:
 
         return readings
 
-    async def get_historical_measurements(
+    async def get_sensor_measurements(
         self,
-        location_id: int,
-        date_from: str,
-        date_to: str,
-        parameter: str = "pm25",
+        sensor_id: int,
+        datetime_from: str,
+        datetime_to: str,
         limit: int = 1000,
+        max_pages: int = 25,
     ) -> List[Dict]:
         """
-        Fetch historical measurements for model training.
+        Fetch historical measurements for one sensor (model training /
+        history backfill).
+
+        Hits `GET /v3/sensors/{id}/measurements` with `datetime_from` /
+        `datetime_to` (the `date_from` variant is silently ignored by the
+        API and returns unfiltered archive data — verified Sept 2026).
 
         Args:
-            location_id: OpenAQ location ID
-            date_from: Start date (ISO format)
-            date_to: End date (ISO format)
-            parameter: Pollutant parameter name
-            limit: Max results per page
+            sensor_id: OpenAQ sensor ID (from location["sensors"])
+            datetime_from: Start datetime (ISO format, UTC)
+            datetime_to: End datetime (ISO format, UTC)
+            limit: Results per page (max 1000)
+            max_pages: Safety cap on pagination
 
         Returns:
-            List of measurement dicts with datetime and value
+            List of dicts with utc datetime string, value, parameter name
         """
-        all_measurements = []
+        all_measurements: List[Dict] = []
         page = 1
 
-        while True:
+        while page <= max_pages:
             params = {
-                "date_from": date_from,
-                "date_to": date_to,
+                "datetime_from": datetime_from,
+                "datetime_to": datetime_to,
                 "limit": limit,
                 "page": page,
-                "sort_order": "asc",
             }
 
             data = await self._rate_limited_request(
-                f"locations/{location_id}/measurements", params
+                f"sensors/{sensor_id}/measurements", params
             )
 
             if not data or "results" not in data:
@@ -459,24 +463,62 @@ class OpenAQClient:
 
             for m in results:
                 value = m.get("value")
-                if value is not None and self._validate_value(parameter, float(value)):
+                param = (m.get("parameter") or {}).get("name", "").lower()
+                period = m.get("period") or {}
+                dt = period.get("datetimeFrom") or {}
+                utc = dt.get("utc") if isinstance(dt, dict) else None
+                if value is None or not utc:
+                    continue
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if self._validate_value(param, value):
                     all_measurements.append({
-                        "datetime": m.get("date", {}).get("utc")
-                            or m.get("datetime"),
-                        "value": float(value),
-                        "parameter": parameter,
+                        "utc": utc,
+                        "value": value,
+                        "parameter": param,
                     })
 
-            # Check if there are more pages
             if len(results) < limit:
                 break
             page += 1
 
         logger.info(
-            f"Retrieved {len(all_measurements)} historical measurements "
-            f"for location {location_id}"
+            f"Retrieved {len(all_measurements)} measurements "
+            f"for sensor {sensor_id}"
         )
         return all_measurements
+
+    async def get_historical_measurements(
+        self,
+        location_id: int,
+        date_from: str,
+        date_to: str,
+        parameter: str = "pm25",
+        limit: int = 1000,
+    ) -> List[Dict]:
+        """
+        Fetch historical measurements for model training (legacy wrapper).
+
+        Resolves the location's sensor for `parameter`, then delegates to
+        :meth:`get_sensor_measurements`.
+        """
+        data = await self._rate_limited_request(f"locations/{location_id}")
+        sensor_id = None
+        results = (data or {}).get("results", [])
+        loc = results[0] if results else data
+        for s in ((loc or {}).get("sensors") or []):
+            if ((s.get("parameter") or {}).get("name", "").lower()
+                    == parameter.lower()):
+                sensor_id = s.get("id")
+                break
+        if sensor_id is None:
+            logger.warning(f"No {parameter} sensor at location {location_id}")
+            return []
+        return await self.get_sensor_measurements(
+            sensor_id, date_from, date_to, limit=limit,
+        )
 
     async def close(self):
         """Close the HTTP client."""

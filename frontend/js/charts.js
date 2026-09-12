@@ -66,6 +66,15 @@
       this.history = (rows || [])
         .filter((r) => r && r.pm25 != null)
         .slice(-24);
+      // Gap detection: pairs >3h apart are data gaps (sensor offline or
+      // refresh missed). Count is surfaced in the chart notes; nulls in
+      // the series render as visible line breaks (spanGaps:false).
+      this.gapCount = 0;
+      for (let i = 1; i < this.history.length; i++) {
+        const a = new Date(this.history[i - 1].timestamp).getTime();
+        const b = new Date(this.history[i].timestamp).getTime();
+        if (isFinite(a) && isFinite(b) && (b - a) > 3 * 3600 * 1000) this.gapCount++;
+      }
       this._render();
     }
 
@@ -118,6 +127,7 @@
             borderWidth: 2,
             pointRadius: 0,
             tension: 0.3,
+            spanGaps: false,
           });
         }
         datasets.push({

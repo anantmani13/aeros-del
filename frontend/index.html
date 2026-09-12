@@ -155,6 +155,18 @@
         <div class="station-list" id="stationList"></div>
       </section>
 
+      <!-- All-station AQI table -->
+      <section class="card glass" id="tableCard">
+        <div class="card-head">
+          <h2>All Stations · AQI</h2>
+          <span class="pill" id="tableCount">—</span>
+        </div>
+        <div class="stable-head"><span>Station</span><span>Now</span><span>H+24</span><span>Err</span></div>
+        <div class="stable-list" id="stationTable">
+          <div class="dim" style="font-size:12px">Loading…</div>
+        </div>
+      </section>
+
       <!-- Forecast chart -->
       <section class="card glass" id="forecastCard">
         <div class="card-head">
@@ -185,6 +197,7 @@
           <div class="acc-cell"><span class="k">Cat hit</span><span class="v" id="accCat">—</span></div>
         </div>
         <div class="acc-note" id="accNote">Loading skill… <a href="/docs" target="_blank">full table: /api/v1/accuracy/stations</a></div>
+        <div class="model-status" id="modelStatus">Checking model weights…</div>
       </section>
 
       <!-- Alerts -->

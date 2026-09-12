@@ -198,6 +198,67 @@
 
       // Accuracy (fetch once per snapshot; cheap cached endpoint)
       this._renderAccuracy(false);
+      this._renderModelStatus();
+      this._renderStationTable();
+    },
+
+    async _renderModelStatus() {
+      const el = document.getElementById('modelStatus');
+      if (!el) return;
+      try {
+        const r = await Utils.fetchJSON('/api/v1/accuracy/model-status');
+        const m = r.members || {};
+        const active = Object.keys(m).filter((k) => m[k] && k !== 'baseline');
+        const lines = [];
+        if (m.baseline) {
+          lines.push(`<span class="mode-base">● BASELINE</span> — no fitted weights on disk yet`);
+        } else {
+          lines.push(`<span class="mode-active">● TRAINED</span> — ${Utils.esc(active.join(' + '))}`);
+        }
+        if (r.db) lines.push(`${r.db.readings} readings · ${r.db.stations} stations in history`);
+        const tr = r.training || {};
+        if (tr.samples != null && !tr.lgbm?.saved) {
+          const lgbm = tr.lgbm || {};
+          lines.push(`Last train: ${tr.samples} samples` +
+            (lgbm.pearson_r != null ? ` · LGBM r=${lgbm.pearson_r}, MAE ${lgbm.model_mae} vs persist ${tr.holdout?.persistence?.mae}` : '') +
+            ` — guardrail refused (needs MAE &lt; persistence)`);
+        } else if (tr.lgbm?.saved) {
+          lines.push(`Last train: SAVED ${Utils.esc((tr.lgbm.path || ''))}`);
+        }
+        el.innerHTML = lines.join('<br>');
+      } catch (e) {
+        el.textContent = 'Model status unavailable.';
+      }
+    },
+
+    async _renderStationTable() {
+      const listEl = document.getElementById('stationTable');
+      if (!listEl) return;
+      try {
+        const r = await Utils.fetchJSON('/api/v1/accuracy/stations');
+        const rows = r.stations || [];
+        document.getElementById('tableCount').textContent = `${rows.length} stations`;
+        listEl.innerHTML = rows.map((s) => {
+          const cur = s.current || {};
+          const h24 = s.forecast_h24 || {};
+          const ls = s.last_step;
+          const color = cur.color || '#808080';
+          const err = ls != null ? ls.error : null;
+          const errColor = err == null ? 'var(--text-dim)' : (Math.abs(err) < 15 ? 'var(--toxic)' : (Math.abs(err) < 40 ? 'var(--amber)' : 'var(--danger)'));
+          return `
+            <div class="stable-row" style="--row-color:${color}" data-id="${Utils.esc(s.station_id)}">
+              <span class="nm">${Utils.esc(s.short_name || s.station_id)}</span>
+              <span class="v" style="color:${color}">${cur.aqi != null ? cur.aqi : '—'}</span>
+              <span class="v" style="color:var(--text-mid)">${h24.aqi != null ? h24.aqi : '—'}</span>
+              <span class="v" style="color:${errColor}">${err != null ? (err > 0 ? '+' : '') + err : '—'}</span>
+            </div>`;
+        }).join('');
+        listEl.querySelectorAll('.stable-row').forEach((row) => {
+          row.addEventListener('click', () => this.selectStation(row.dataset.id));
+        });
+      } catch (e) {
+        listEl.innerHTML = '<div class="dim" style="font-size:12px">Table unavailable.</div>';
+      }
     },
 
     async _renderAccuracy(force) {
@@ -361,12 +422,14 @@
           const c = s.current || {};
           const color = c.color || '#808080';
           const sel = this.state.selectedStation === s.id ? 'selected' : '';
+          const histN = s.history_count != null ? s.history_count : ((s.history || []).length);
+          const stale = histN < 6 ? ' · only ' + histN + ' pts' : ' · ' + histN + ' pts';
           return `
             <div class="station-row ${sel}" style="--row-color:${color}" data-id="${Utils.esc(s.id)}">
               <span class="dot-ind"></span>
               <div class="meta">
                 <div class="name">${Utils.esc(s.short_name || s.name)}</div>
-                <div class="zone">${Utils.esc(c.category || '—')} · ${Utils.esc(c.timestamp ? Utils.fmtTime(c.timestamp) : '')}</div>
+                <div class="zone">${Utils.esc(c.category || '—')} · ${Utils.esc(c.timestamp ? Utils.fmtTime(c.timestamp) : '')}${Utils.esc(stale)}</div>
               </div>
               <span class="aqi">${c.aqi != null ? c.aqi : '—'}</span>
             </div>`;
@@ -401,9 +464,11 @@
           .filter((k) => forecast.models[k])
           .map((k) => (k === 'baseline' ? 'statistical baseline' : k));
         const histN = (station.history || []).length;
+        const gaps = this.forecastChart?.gapCount || 0;
         document.getElementById('modelNotes').textContent =
           `Ensemble: ${model.join(' + ') || 'statistical baseline'} · ${forecast.timestamps.length}h` +
-          (histN ? ` · green = observed past ${Math.min(histN, 24)} readings` : '');
+          (histN ? ` · green = observed past ${Math.min(histN, 24)} readings` : '') +
+          (gaps ? ` · ⚠ ${gaps} data gap${gaps > 1 ? 's' : ''} in history` : '');
       }
 
       // Keep map in sync with selected station
