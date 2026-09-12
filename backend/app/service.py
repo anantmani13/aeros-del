@@ -251,14 +251,16 @@ class AQIService:
                 except Exception as e:
                     logger.debug("PBL injection failed: %s", e)
 
-        aisi_result = await self._safe(self.aisi.compute(weather))
-        self.state["aisi"] = aisi_result or {}
-
-        # Mean PM2.5 across resolved stations
+        # Mean PM2.5 across resolved stations (needed BEFORE AISI so
+        # GRAP stage agrees with the AQI category, not just meteorology).
         records = self.state.get("raw_records", [])
         pm25s = [r.get("pollutants", {}).get("pm25") for r in records]
         pm25s = [p for p in pm25s if p is not None]
         mean_pm25 = sum(pm25s) / len(pm25s) if pm25s else 120.0
+
+        aisi_result = await self._safe(
+            self.aisi.compute(weather, pm25=mean_pm25))
+        self.state["aisi"] = aisi_result or {}
 
         pblh = (aisi_result or {}).get("pbl", {}).get("pbl_height_m", 700.0)
         rad_result = await self._safe(self.radiation.compute(

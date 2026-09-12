@@ -29,6 +29,7 @@ from backend.app.routes import (
     forecast_router,
     alerts_router,
     fire_router,
+    accuracy_router,
 )
 
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
@@ -96,6 +97,7 @@ app.include_router(stations_router)
 app.include_router(forecast_router)
 app.include_router(alerts_router)
 app.include_router(fire_router)
+app.include_router(accuracy_router)
 
 
 # ── WebSocket live feed ────────────────────────────────────────────

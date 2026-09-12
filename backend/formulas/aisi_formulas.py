@@ -12,16 +12,28 @@ from typing import Tuple
 
 
 # ── AISI Calibration Constants (Delhi Winter) ────────────────────────
-DEFAULT_ALPHA = 2.5    # temperature gradient weight
+# NOTE on units: temp_gradient here is ΔT per 100 m (K/100m), NOT K/m.
+# Typical Delhi winter: night inversion +1 to +4 K/100m, day lapse ≈ -1 K/100m.
+# α=2.5 maps +1.5K → 3.75 pts, +3K → 7.5 pts (severe). If you pass K/m,
+# multiply by 100 first (0.015 K/m = 1.5 K/100m).
+DEFAULT_ALPHA = 2.5    # temperature gradient weight (per K/100m)
 DEFAULT_BETA = 150.0   # inverse PBL height weight
 DEFAULT_GAMMA = 3.0    # Richardson number weight
 AISI_MAX = 10.0
+
+# Clamp Ri_b so one noisy wind reading can't swing AISI by ±5 points.
+RI_MIN = -0.5
+RI_MAX = 2.0
+# Clamp gradient so extreme synthetic values stay in calibration envelope.
+GRAD_MIN = -2.0  # K/100m (strong daytime lapse)
+GRAD_MAX = 5.0   # K/100m (extreme smog-night inversion)
 
 
 def temperature_gradient(
     t_surface_k: float,
     t_upper_k: float,
     dz_m: float = 100.0,
+    per_100m: bool = True,
 ) -> float:
     """
     Calculate vertical temperature gradient (∂T/∂z).
@@ -32,11 +44,14 @@ def temperature_gradient(
         t_surface_k: Surface temperature (K or °C — same unit required)
         t_upper_k: Upper-level temperature (K or °C)
         dz_m: Height difference (m), default 100m
+        per_100m: If True (default) return K/100m to match AISI
+            calibration. If False return K/m.
 
     Returns:
-        Temperature gradient (K/m or °C/m)
+        Temperature gradient (K/100m by default, K/m if per_100m=False)
     """
-    return (t_upper_k - t_surface_k) / max(dz_m, 1.0)
+    grad_per_m = (t_upper_k - t_surface_k) / max(dz_m, 1.0)
+    return grad_per_m * 100.0 if per_100m else grad_per_m
 
 
 def calculate_aisi(
@@ -50,7 +65,7 @@ def calculate_aisi(
     """
     Calculate Atmospheric Inversion Severity Index (AISI).
 
-    AISI = min(10.0, α*(∂T/∂z)_sfc + β*(1/max(PBLH, 50)) + γ*Ri_b)
+    AISI = min(10.0, α*(ΔT/100m) + β*(1/max(PBLH, 50)) + γ*Ri_b_clamped)
 
     Designed so that:
     - AISI 0-2: No inversion / well-mixed
@@ -59,9 +74,11 @@ def calculate_aisi(
     - AISI 8-10: Severe inversion, extreme trapping
 
     Args:
-        temp_gradient: Surface temperature gradient (K/m), positive = inversion
+        temp_gradient: Surface inversion strength ΔT/100m (K/100m),
+            positive = inversion. Values are clamped to [GRAD_MIN, GRAD_MAX].
         pbl_height_m: Planetary boundary layer height (m)
-        ri_bulk: Bulk Richardson number (dimensionless)
+        ri_bulk: Bulk Richardson number (dimensionless, clamped to
+            [RI_MIN, RI_MAX] so calm-wind noise can't dominate)
         alpha: Weight for temperature gradient term
         beta: Weight for inverse PBL height term
         gamma: Weight for Richardson number term
@@ -69,15 +86,59 @@ def calculate_aisi(
     Returns:
         AISI value clamped to [0, 10]
     """
-    pblh_capped = max(pbl_height_m, 50.0)
+    import math
+    try:
+        tg = float(temp_gradient)
+        pblh = float(pbl_height_m)
+        ri = float(ri_bulk)
+    except (TypeError, ValueError):
+        return 0.0
+    if not (math.isfinite(tg) and math.isfinite(pblh) and math.isfinite(ri)):
+        return 0.0
+    tg = max(GRAD_MIN, min(GRAD_MAX, tg))
+    ri = max(RI_MIN, min(RI_MAX, ri))
+    pblh_capped = max(pblh, 50.0)
 
     aisi = (
-        alpha * temp_gradient
+        alpha * tg
         + beta * (1.0 / pblh_capped)
-        + gamma * ri_bulk
+        + gamma * ri
     )
 
     return max(0.0, min(AISI_MAX, aisi))
+
+
+def calculate_aisi_detailed(
+    temp_gradient: float,
+    pbl_height_m: float,
+    ri_bulk: float,
+    alpha: float = DEFAULT_ALPHA,
+    beta: float = DEFAULT_BETA,
+    gamma: float = DEFAULT_GAMMA,
+) -> dict:
+    """Same as calculate_aisi but returns per-term contributions for debugging.
+
+    Returns dict with term_grad, term_pbl, term_ri, aisi, and clamped inputs.
+    Use this in tests / /aisi/current sub_terms to see which term dominates.
+    """
+    tg = max(GRAD_MIN, min(GRAD_MAX, float(temp_gradient or 0.0)))
+    ri = max(RI_MIN, min(RI_MAX, float(ri_bulk or 0.0)))
+    pblh = max(float(pbl_height_m or 700.0), 50.0)
+    term_grad = alpha * tg
+    term_pbl = beta * (1.0 / pblh)
+    term_ri = gamma * ri
+    total = max(0.0, min(AISI_MAX, term_grad + term_pbl + term_ri))
+    return {
+        "term_grad": round(term_grad, 3),
+        "term_pbl": round(term_pbl, 3),
+        "term_ri": round(term_ri, 3),
+        "aisi": round(total, 2),
+        "inputs_clamped": {
+            "temp_gradient_k_per_100m": tg,
+            "pbl_height_m": pblh,
+            "ri_bulk": ri,
+        },
+    }
 
 
 def aisi_severity_category(aisi: float) -> Tuple[str, str, str]:

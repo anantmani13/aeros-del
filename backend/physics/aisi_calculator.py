@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 
 from backend.formulas.aisi_formulas import (
     calculate_aisi,
+    calculate_aisi_detailed,
     aisi_severity_category,
     grap_activation_level,
 )
@@ -53,6 +54,7 @@ class AISICalculator:
         self,
         weather: Dict,
         hour_ist: Optional[int] = None,
+        pm25: Optional[float] = None,
     ) -> Dict:
         """
         Compute the current AISI from a weather snapshot.
@@ -60,6 +62,9 @@ class AISICalculator:
         Args:
             weather: Weather dict (see WeatherClient / PBLModel).
             hour_ist: Local hour; defaults to current IST hour.
+            pm25: Optional mean PM2.5 (µg/m³) so the GRAP stage agrees
+                with the AQI category. If omitted, GRAP is AISI-only
+                (legacy behaviour, may mismatch Severe AQI + low AISI).
 
         Returns:
             Dict with aisi, category, description, color, sub_terms,
@@ -71,7 +76,7 @@ class AISICalculator:
         # calibration envelope (α ≈ 2.5 designed for K/100m of surface layer).
         temp_grad = pbl.get("inversion_strength_k", 0.0)
 
-        raw_aisi = calculate_aisi(
+        detail = calculate_aisi_detailed(
             temp_gradient=temp_grad,
             pbl_height_m=pbl.get("pbl_height_m", 700.0),
             ri_bulk=pbl.get("ri_bulk", 0.1),
@@ -79,6 +84,7 @@ class AISICalculator:
             beta=self.beta,
             gamma=self.gamma,
         )
+        raw_aisi = detail["aisi"]
 
         # Temporal smoothing: EMA + per-cycle step cap. Kills single-cycle
         # jumps from noisy wind/RH readings without masking real trends.
@@ -104,9 +110,13 @@ class AISICalculator:
                 "temp_gradient_k_per_100m": round(temp_grad, 6),
                 "pbl_height_m": pbl.get("pbl_height_m"),
                 "ri_bulk": pbl.get("ri_bulk"),
+                # Per-term points so you can see which physics dominates:
+                "term_grad": detail["term_grad"],
+                "term_pbl": detail["term_pbl"],
+                "term_ri": detail["term_ri"],
             },
             "pbl": pbl,
-            "grap": grap_activation_level(aisi),
+            "grap": grap_activation_level(aisi, pm25=pm25 or 0.0),
             "trend": self._trend(),
         }
 

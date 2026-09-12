@@ -1,15 +1,15 @@
 {
-  "generated_at": "2026-09-11T20:53:38.476899+00:00",
+  "generated_at": "2026-09-12T04:39:59.242198+00:00",
   "db": "C:\\Users\\Anant\\Desktop\\All Projects Btech\\SIH\\data\\aqi_data.db",
   "stations": 25,
   "next_observation_skill": {
-    "pairs": 29,
+    "pairs": 30,
     "<=1h": {
       "baseline": {
         "n": 4,
-        "mae": 71.19,
-        "rmse": 118.43,
-        "bias": 60.94,
+        "mae": 77.96,
+        "rmse": 129.82,
+        "bias": 69.31,
         "cat_acc": 0.0
       },
       "persistence": {
@@ -22,20 +22,26 @@
     },
     "1-6h": {
       "baseline": {
-        "n": 0,
+        "n": 1,
+        "mae": 4.18,
+        "rmse": 4.18,
+        "bias": 4.18,
         "cat_acc": 0.0
       },
       "persistence": {
-        "n": 0,
-        "cat_acc": 0.0
+        "n": 1,
+        "mae": 0.0,
+        "rmse": 0.0,
+        "bias": 0.0,
+        "cat_acc": 1.0
       }
     },
     ">6h": {
       "baseline": {
         "n": 25,
-        "mae": 32.23,
-        "rmse": 42.33,
-        "bias": 23.8,
+        "mae": 47.6,
+        "rmse": 64.72,
+        "bias": 43.67,
         "cat_acc": 0.24
       },
       "persistence": {
@@ -46,7 +52,7 @@
         "cat_acc": 0.2
       }
     },
-    "pearson_r_baseline": 0.064
+    "pearson_r_baseline": -0.001
   },
   "gbm_next_step": {
     "trained": false,

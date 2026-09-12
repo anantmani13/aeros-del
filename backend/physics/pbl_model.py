@@ -31,7 +31,11 @@ logger = logging.getLogger(__name__)
 # behavior used to synthesize upper-air profiles when measurements lack
 # the required levels.
 DRY_LAPSE_C_PER_100M = 0.98
-NOCTURNAL_INVERSION_C = 1.5   # typical ΔT across lowest 100m on calm nights
+# Calm, polluted Delhi winter nights regularly show +2 to +4 K/100m in the
+# lowest 100 m (IMD radiosonde / IITM SAFAR). The old 1.5 K cap meant AISI
+# could never exceed ~6.7 even at night, so "Severe" was unreachable.
+NOCTURNAL_INVERSION_C = 2.5   # typical ΔT across lowest 100m on calm nights
+NOCTURNAL_INVERSION_MAX_C = 4.0  # extreme smog-night cap
 
 
 class PBLModel:
@@ -89,8 +93,10 @@ class PBLModel:
             # Synthesize a modest upper-air profile. During nighttime a
             # surface inversion is modelled; during daytime the profile
             # warms dry-adiabatically in the mixed layer.
+            spd_for_inv = self._to_float(
+                weather.get("wind_speed_ms"), default=2.0)
             t_100m = self._estimate_temperature_at_100m(
-                t_sfc, hour_ist, pbl_obs
+                t_sfc, hour_ist, pbl_obs, wind_speed_ms=spd_for_inv
             )
             inversion_k = inversion_strength(t_sfc + 273.15, t_100m + 273.15)
 
@@ -140,18 +146,38 @@ class PBLModel:
         t_sfc: float,
         hour_ist: int,
         pbl_obs: Optional[float],
+        wind_speed_ms: float = 2.0,
     ) -> float:
         """Estimate temperature at 100 m AGL using a smooth diurnal model.
 
         A cosine blend replaces the old night/day step function, which
-        injected ~1.5 K (∼3.8 AISI points) discontinuities at 07/11/17/20h.
+        injected ~1.5 K (~3.8 AISI points) discontinuities at 07/11/17/20h.
+
+        Calm + shallow-PBL nights get a stronger inversion (up to
+        NOCTURNAL_INVERSION_MAX_C), windy / deep-PBL nights get weaker.
+        This lets genuine severe events reach AISI 8+ while breezy nights
+        stay mild — the old fixed 1.5K*0.8/1.0 could never do that.
         """
         import math
         # Night weight: 1 at 02h, 0 at 14h (smooth 24h cosine)
         night_w = 0.5 * (1.0 + math.cos((hour_ist - 2) * math.pi / 12.0))
         night_w = max(0.0, min(1.0, night_w))
-        calm_factor = 1.0 if (pbl_obs is not None and pbl_obs < 400) else 0.8
-        night_t = t_sfc + NOCTURNAL_INVERSION_C * calm_factor
+        # Calm factor: still air + shallow PBL = strong inversion.
+        # wind <1.5 m/s and PBL <250 m → near-max inversion.
+        calm = 1.0
+        if wind_speed_ms < 1.5:
+            calm = 1.4
+        elif wind_speed_ms < 3.0:
+            calm = 1.0
+        else:
+            calm = 0.6
+        if pbl_obs is not None:
+            if pbl_obs < 250:
+                calm *= 1.2
+            elif pbl_obs > 800:
+                calm *= 0.7
+        inv = min(NOCTURNAL_INVERSION_C * calm, NOCTURNAL_INVERSION_MAX_C)
+        night_t = t_sfc + inv
         day_t = t_sfc - DRY_LAPSE_C_PER_100M
         return night_w * night_t + (1.0 - night_w) * day_t
 

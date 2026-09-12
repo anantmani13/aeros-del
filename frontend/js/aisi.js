@@ -4,9 +4,11 @@
 (function (global) {
   'use strict';
 
+  // Must match backend aisi_severity_category(): 0-2 / 2-5 / 5-8 / 8-10.
+  // (Old frontend used 0-3 for green, which hid Mild 2-3 events.)
   const AISI_ZONES = [
-    { lo: 0,  hi: 3,  color: '#00e400', label: 'Well-Mixed' },
-    { lo: 3,  hi: 5,  color: '#ffff00', label: 'Mild Inversion' },
+    { lo: 0,  hi: 2,  color: '#00e400', label: 'Well-Mixed' },
+    { lo: 2,  hi: 5,  color: '#ffff00', label: 'Mild Inversion' },
     { lo: 5,  hi: 8,  color: '#ff7e00', label: 'Moderate Inversion' },
     { lo: 8,  hi: 10, color: '#ff0000', label: 'Severe Inversion' },
   ];
