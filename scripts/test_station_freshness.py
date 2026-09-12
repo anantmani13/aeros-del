@@ -165,11 +165,13 @@ async def main():
     stale_official = StationReading(
         station_id="17", station_name="R K Puram, Delhi - DPCC",
         latitude=28.5632, longitude=77.1869, timestamp=old_ts,
-        pollutants={"pm25": 120.0, "pm10": 200.0}, source="openaq")
+        pollutants={"pm25": 120.0, "pm10": 200.0}, source="openaq",
+        provider="CPCB")
     fresh_private = StationReading(
         station_id="4712609", station_name="Air Check",
-        latitude=28.6000, longitude=77.2200, timestamp=new_ts,
-        pollutants={"pm25": 45.0, "pm10": 80.0}, source="openaq")
+        latitude=28.5900, longitude=77.2100, timestamp=new_ts,  # ~3.7 km
+        pollutants={"pm25": 45.0, "pm10": 80.0}, source="openaq",
+        provider="AirGradient")
     m_fresh = svc._match_readings([stale_official, fresh_private],
                                   fresh_within_h=6)
     ok &= check("fresh beats anchored-stale",
@@ -179,11 +181,51 @@ async def main():
     ok &= check("legacy path keeps anchor behavior",
                 m_legacy.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 120.0,
                 f"got {m_legacy.get('t-rkp', {}).get('pollutants')}")
-    # No fresh monitor nearby -> stale fallback still matches (flagged stale).
+    # No fresh monitor nearby -> stale reference fallback still matches.
     m_only_stale = svc._match_readings([stale_official], fresh_within_h=6)
     ok &= check("stale fallback when nothing fresh",
                 m_only_stale.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 120.0,
                 f"got {m_only_stale.get('t-rkp')}")
+
+    # 5b. tier-2 containment + sanity gate -------------------------------
+    far_private = StationReading(
+        station_id="4712610", station_name="Far Suburb Sensor",
+        latitude=28.7000, longitude=77.3000, timestamp=new_ts,  # ~19 km
+        pollutants={"pm25": 44.0}, source="openaq", provider="AirGradient")
+    m_far = svc._match_readings([stale_official, far_private],
+                                fresh_within_h=6)
+    ok &= check("far private cannot smear (5 km cap)",
+                m_far.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 120.0,
+                f"got {m_far.get('t-rkp', {}).get('pollutants')}")
+    indoor = StationReading(
+        station_id="4663956", station_name="Some Apartments",
+        latitude=28.5650, longitude=77.1880, timestamp=new_ts,  # adjacent
+        pollutants={"pm25": 3.4}, source="openaq", provider="AirGradient")
+    m_indoor = svc._match_readings([stale_official, indoor],
+                                   fresh_within_h=6)
+    ok &= check("implausible indoor value rejected (pm25 3.4)",
+                m_indoor.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 120.0,
+                f"got {m_indoor.get('t-rkp', {}).get('pollutants')}")
+    stale_private = StationReading(
+        station_id="999", station_name="Old Balcony Sensor",
+        latitude=28.5650, longitude=77.1880, timestamp=old_ts,
+        pollutants={"pm25": 60.0}, source="openaq", provider="AirGradient")
+    m_stalepriv = svc._match_readings([stale_private, stale_official],
+                                      fresh_within_h=6)
+    ok &= check("stale private discarded, stale ref kept",
+                m_stalepriv.get("t-rkp", {}).get("pollutants", {}).get("pm25") == 120.0,
+                f"got {m_stalepriv.get('t-rkp', {}).get('pollutants')}")
+    ok &= check("reference detection by provider",
+                AQIService._is_reference_source("AirGradient") is False
+                and AQIService._is_reference_source("CPCB") is True
+                and AQIService._is_reference_source("AirNow") is True)
+    ok &= check("reference detection by name suffix",
+                AQIService._is_reference_source("unknown",
+                    "R K Puram, Delhi - DPCC") is True)
+    ok &= check("sanity gate",
+                AQIService._sane_reading(indoor) is False
+                and AQIService._sane_reading(fresh_private) is True
+                and AQIService._sane_reading(stale_official) is True)
 
     # 6. CAMS parse: latest slot <= now, co µg/m³ -> mg/m³ ----------------
     cams = CAMSClient()

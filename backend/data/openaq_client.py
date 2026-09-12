@@ -49,6 +49,7 @@ class StationReading:
     timestamp: str
     pollutants: Dict[str, Optional[float]]
     source: str = "openaq"
+    provider: str = "unknown"
 
 
 class OpenAQClient:
@@ -232,12 +233,16 @@ class OpenAQClient:
                     pname = param.get("name", "").lower()
                     self._sensor_param_map[s.get("id")] = pname
                     params.add(pname)
+            prov = loc.get("provider") or {}
             return {
                 "id": loc.get("id"),
                 "name": loc.get("name", "Unknown"),
                 "latitude": loc.get("coordinates", {}).get("latitude"),
                 "longitude": loc.get("coordinates", {}).get("longitude"),
                 "parameters": sorted(params),
+                "provider": (prov.get("name", "unknown")
+                             if isinstance(prov, dict)
+                             else str(prov or "unknown")),
                 "last_updated": (loc.get("datetimeLast") or {}).get("utc")
                     if isinstance(loc.get("datetimeLast"), dict)
                     else loc.get("datetimeLast"),
@@ -446,6 +451,7 @@ class OpenAQClient:
                     timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
                     pollutants=pollutants,
                     source="openaq",
+                    provider=loc.get("provider", "unknown") or "unknown",
                 ))
 
         return readings

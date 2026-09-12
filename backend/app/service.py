@@ -836,43 +836,129 @@ class AQIService:
                     out.append(tok)
         return out
 
+    # Providers operating calibrated outdoor monitors (government
+    # networks + research-grade fleets). Everything else is treated as a
+    # private low-cost sensor: usable only when fresh, sane and close.
+    REFERENCE_PROVIDERS = frozenset({
+        "cpcb", "dpcc", "imd", "iitm", "safar",
+        "hspcb", "uppcb", "mhua", "airnow", "clarity",
+    })
+    FRESH_REF_RADIUS_KM = 10.0
+    FRESH_PRIVATE_RADIUS_KM = 5.0
+    STALE_REF_RADIUS_KM = 25.0
+    # Outdoor plausibility floor: Delhi ambient PM2.5 essentially never
+    # drops below ~5 µg/m³ even in clean monsoon spells — below that the
+    # sensor is faulty or indoors (Sept 2026: an apartment sensor reporting
+    # 3.4 µg/m³ painted 8 stations with AQI 5.7).
+    OUTDOOR_PM25_FLOOR = 5.0
+    OUTDOOR_PM10_FLOOR = 8.0
+
+    @classmethod
+    def _is_reference_source(cls, provider: Any,
+                             station_name: str = "") -> bool:
+        """Calibrated-network monitor? (provider token or name suffix)."""
+        text = f"{provider or ''} {station_name or ''}".lower()
+        return any(tok in text for tok in cls.REFERENCE_PROVIDERS)
+
+    @classmethod
+    def _sane_reading(cls, reading: Any) -> bool:
+        """Reject flatline / implausible-indoor sensor output."""
+        pollutants = getattr(reading, "pollutants", None) or {}
+        values = [v for v in pollutants.values() if v is not None]
+        if not values:
+            return False
+        if all(v == 0 for v in values):
+            return False
+        pm25 = pollutants.get("pm25")
+        if pm25 is not None and pm25 < cls.OUTDOOR_PM25_FLOOR:
+            return False
+        if (pm25 is None and pollutants.get("pm10") is not None
+                and pollutants["pm10"] < cls.OUTDOOR_PM10_FLOOR):
+            return False
+        return True
+
     def _match_readings(self, readings: List[Any],
-                          fresh_within_h: Optional[float] = None
-                          ) -> Dict[str, Dict]:
+                        fresh_within_h: Optional[float] = None
+                        ) -> Dict[str, Dict]:
         """Map OpenAQ readings to station metadata.
 
-        Name-anchored first (an OpenAQ location whose name shares a token
-        with our station wins regardless of distance), nearest-proximity
-        fallback within 25 km. Fixes identical readings copied across
-        neighbouring stations (e.g. ITO vs Mandir Marg).
+        Tiered pools (first match wins per station):
 
-        When fresh_within_h is set, readings newer than that win first:
-        stations match the fresh pool, and only stations with no fresh
-        monitor nearby fall back to older readings (flagged stale
-        downstream). Without this, a correctly-named but day-old official
-        monitor beats a nearby live sensor on anchor alone.
+        1. Fresh reference monitors (govt / calibrated fleets, ≤10 km) —
+           correctly-named anchor still preferred inside the pool.
+        2. Fresh private sensors, but only sane ones within 5 km (an
+           apartment sensor must never paint half the city).
+        3. Stale reference monitors within 25 km (flagged stale
+           downstream; the CAMS fallback usually replaces these first).
+        Stale private readings are discarded outright.
+
+        Without tiers, a correctly-named but day-old official monitor
+        beats a nearby live sensor on anchor alone — or one fresh
+        apartment sensor smears AQI 5.7 across 8 stations.
         """
         if not readings:
             return {}
         if fresh_within_h is not None:
-            fresh = [
-                r for r in readings
+            fresh_ids = {
+                id(r) for r in readings
                 if (self._reading_age_hours(getattr(r, "timestamp", None))
                     or float("inf")) <= fresh_within_h
-            ]
+            }
+            fresh = [r for r in readings if id(r) in fresh_ids]
             if fresh:
-                matched = self._match_pool(fresh)
-                if len(matched) >= len(self.stations):
-                    return matched
-                for sid, entry in self._match_pool(readings).items():
-                    matched.setdefault(sid, entry)
+                matched: Dict[str, Dict] = {}
+
+                def _remaining() -> Optional[set]:
+                    left = {s["id"] for s in self.stations} - set(matched)
+                    return left or None
+
+                # Tier 1 — fresh reference network.
+                pool = [r for r in fresh
+                        if self._is_reference_source(
+                            getattr(r, "provider", "unknown"),
+                            getattr(r, "station_name", ""))
+                        and self._sane_reading(r)]
+                remaining = _remaining()
+                if pool and remaining:
+                    matched.update(self._match_pool(
+                        pool, radius_km=self.FRESH_REF_RADIUS_KM,
+                        only_ids=remaining))
+                # Tier 2 — fresh private, sane and strictly local
+                # (disjoint from tier 1 by the reference test).
+                remaining = _remaining()
+                if remaining:
+                    pool = [r for r in fresh
+                            if not self._is_reference_source(
+                                getattr(r, "provider", "unknown"),
+                                getattr(r, "station_name", ""))
+                            and self._sane_reading(r)]
+                    if pool:
+                        matched.update(self._match_pool(
+                            pool, radius_km=self.FRESH_PRIVATE_RADIUS_KM,
+                            only_ids=remaining))
+                # Tier 3 — stale reference fallback (STALE-badged).
+                remaining = _remaining()
+                if remaining:
+                    pool = [r for r in readings
+                            if id(r) not in fresh_ids
+                            and self._is_reference_source(
+                                getattr(r, "provider", "unknown"),
+                                getattr(r, "station_name", ""))
+                            and self._sane_reading(r)]
+                    if pool:
+                        matched.update(self._match_pool(
+                            pool, radius_km=self.STALE_REF_RADIUS_KM,
+                            only_ids=remaining))
                 return matched
         return self._match_pool(readings)
 
-    def _match_pool(self, readings: List[Any]) -> Dict[str, Dict]:
+    def _match_pool(self, readings: List[Any], radius_km: float = 25.0,
+                    only_ids: Optional[set] = None) -> Dict[str, Dict]:
         """Match one pool of readings to stations (see _match_readings)."""
         mapped = {}
         for station in self.stations:
+            if only_ids is not None and station["id"] not in only_ids:
+                continue
             lat, lon = station["latitude"], station["longitude"]
             name_keys = self._station_name_keys(station)
 
@@ -882,8 +968,8 @@ class AQIService:
             best_pollutants: Dict[str, float] = {}
             best_pollutant_dist: Dict[str, float] = {}
             best = None
-            best_eff = 25.0  # km radius on effective (anchor-weighted) distance
-            best_dist = 25.0
+            best_eff = radius_km  # km radius on effective (anchor-weighted) distance
+            best_dist = radius_km
 
             for reading in readings:
                 rlat = getattr(reading, "latitude", None)
@@ -896,7 +982,7 @@ class AQIService:
                 rname = str(getattr(reading, "station_name", "") or "").lower()
                 anchored = any(k in rname for k in name_keys)
                 eff_d = d * 0.5 if anchored else d
-                if eff_d <= 25.0:  # km radius on effective distance
+                if eff_d <= radius_km:  # km radius on effective distance
                     if best is None or eff_d < best_eff:
                         best_eff = eff_d
                         best_dist = d

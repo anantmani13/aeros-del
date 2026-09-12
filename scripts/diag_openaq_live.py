@@ -76,6 +76,38 @@ async def main():
     dists = sorted(v.get("matched_distance_km", -1) for v in mapped.values())
     print(f"  matched distances (km): {dists[:10]} ... {dists[-5:]}")
 
+    # Tiered (production) matching: fresh-ref / fresh-private / stale-ref.
+    tiered = svc._match_readings(readings, fresh_within_h=6.0)
+    print(f"TIERED stations={len(tiered)}/{len(svc.stations)}")
+    # Attribute each match back to its reading for a tier breakdown.
+    by_key = {}
+    for r in readings:
+        by_key[(r.station_name, r.timestamp,
+                tuple(sorted((r.pollutants or {}).items())))] = r
+    from collections import Counter as _C
+    tiers = _C()
+    for sid, entry in tiered.items():
+        key = None
+        for r in readings:
+            if (r.timestamp == entry["timestamp"]
+                    and (r.pollutants or {}).get("pm25")
+                    == (entry["pollutants"] or {}).get("pm25")):
+                key = r
+                break
+        if key is None:
+            tiers["unresolved"] += 1
+            continue
+        a = age_h(key.timestamp) or 999
+        ref = AQIService._is_reference_source(key.provider,
+                                              key.station_name)
+        tiers[("fresh-ref" if a <= 6 and ref
+               else "fresh-private" if a <= 6 else "stale-ref")] += 1
+    print("  tier breakdown:", dict(tiers))
+    cams_needed = sum(
+        1 for v in tiered.values()
+        if (age_h(v["timestamp"]) or 999) > 6)
+    print(f"  stations CAMS would refresh: {cams_needed}")
+
     await svc.close()
 
 
