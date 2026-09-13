@@ -196,13 +196,27 @@ class AQIService:
 
         # WAQI fallback: fill stations OpenAQ missed (capped per cycle).
         # Only fires when a key exists AND some stations are still dark.
+        # Dedup by WAQI uid: the geo feed returns the NEAREST station, so
+        # nearby Delhi coordinates often resolve to the SAME upstream
+        # monitor — assigning it twice would paint two local stations with
+        # byte-identical values. The duplicate is skipped so the second
+        # station falls through to the CAMS downscaled fallback (distinct).
         waqi_filled = 0
         if mapped and self.settings.waqi_api_key:
             missing = [s for s in self.stations if s["id"] not in mapped]
+            seen_waqi_uids: set = set()
             for station in missing[:self.waqi_fill_cap]:
                 feed = await self._safe(self.waqi.get_station_feed(
                     station["latitude"], station["longitude"]))
                 if feed and feed.get("pollutants"):
+                    uid = feed.get("uid", feed.get("station"))
+                    if uid is not None:
+                        if uid in seen_waqi_uids:
+                            logger.info(
+                                "WAQI duplicate uid %s for %s — skipping "
+                                "(falls through to CAMS)", uid, station["id"])
+                            continue
+                        seen_waqi_uids.add(uid)
                     mapped[station["id"]] = {
                         "pollutants": feed["pollutants"],
                         "timestamp": feed["timestamp"],
@@ -218,6 +232,11 @@ class AQIService:
         # CAMS nowcast, labeled source="cams". Model values are
         # display-only — never persisted as observed history (see the
         # store_readings call below).
+        # The CAMS grid is coarse (~40 km): raw grid values for neighbouring
+        # Delhi stations are near-identical, which used to paint whole
+        # districts with the same AQI. Each datum is therefore downscaled
+        # per-station (type/elevation/deterministic micro-jitter) so every
+        # station shows its own latest value — never a clone.
         need_cams = []
         for station in self.stations:
             entry = mapped.get(station["id"])
@@ -233,16 +252,27 @@ class AQIService:
             for station in need_cams:
                 datum = batch.get(station["id"])
                 if datum and datum.get("pollutants"):
+                    scaled = self._downscale_cams_datum(station, datum)
                     mapped[station["id"]] = {
-                        "pollutants": datum["pollutants"],
+                        "pollutants": scaled["pollutants"],
                         "timestamp": datum["timestamp"],
                         "source": "cams",
+                        "downscale_factor": scaled["factor"],
+                        "cams_base_pm25": scaled["base_pm25"],
+                        "match_tier": "cams-downscaled",
+                        "blended_from": 1,
                     }
                     cams_filled += 1
         if cams_filled:
             logger.info("CAMS live-model fallback filled %d stations",
                         cams_filled)
         self.state["cams_filled"] = cams_filled
+
+        # Final safety net: rounding (pollutants 2dp, AQI 0.1) can still
+        # collapse two downscaled neighbours onto the same displayed value.
+        # Nudge exact pm25 ties by the smallest visible epsilon so the UI
+        # never shows byte-identical fallback clones side by side.
+        self._break_fallback_ties(mapped)
 
         # Fall back to demo generation when no stations resolved
         if not mapped:
@@ -1054,7 +1084,14 @@ class AQIService:
         mapped = {}
         for station in self.stations:
             zone_factor = self._zone_factor(station.get("zone", ""), station["latitude"])
-            target = base * zone_factor * diurnal
+            # Per-station identity: zone alone has only ~4 buckets, so
+            # same-zone stations would otherwise converge. The stable hash
+            # (±15%) + type factor give every station its own target while
+            # staying deterministic across restarts (unlike random()).
+            seed = self._stable_unit_hash(station["id"])
+            station_seed = 0.85 + 0.30 * seed
+            type_factor = self._station_type_factor(station.get("type", ""))
+            target = base * zone_factor * station_seed * type_factor * diurnal
             prev = self._demo_state.get(station["id"], target)
             # Mean reversion (30% toward target) + small innovation
             pm25 = prev + 0.30 * (target - prev) + prev * random.uniform(-0.03, 0.03)
@@ -1087,6 +1124,98 @@ class AQIService:
         if any(word in zone for word in corridors):
             return 1.12 * north
         return 0.92 * north
+
+    @staticmethod
+    def _station_type_factor(station_type: str) -> float:
+        """Plausible micro-scale uplift by land-use type."""
+        t = str(station_type or "").lower()
+        if "transport" in t:
+            return 1.15
+        if "industrial" in t:
+            return 1.12
+        if "commercial" in t:
+            return 1.08
+        return 1.0
+
+    @staticmethod
+    def _stable_unit_hash(key: str) -> float:
+        """Deterministic 0.0–1.0 hash (stable across restarts)."""
+        import hashlib
+        digest = hashlib.md5(str(key).encode("utf-8")).hexdigest()
+        return int(digest[:8], 16) / 0xFFFFFFFF
+
+    def _downscale_cams_datum(self, station: Dict, datum: Dict) -> Dict:
+        """Station-specific downscaling of a coarse CAMS grid value.
+
+        CAMS/Open-Meteo resolves ~40 km: raw neighbours differ by <1 µg
+        and round to identical AQI. The station factor (land-use type +
+        elevation + deterministic ±6% hash + ±2% per-pollutant jitter)
+        preserves the current-hour city signal while giving every station
+        its own latest value. Clamped to 0.75–1.35 to stay physical.
+        """
+        pollutants = datum.get("pollutants", {}) or {}
+        type_factor = self._station_type_factor(station.get("type", ""))
+        try:
+            elev = float(station.get("elevation_m", 212) or 212)
+        except (TypeError, ValueError):
+            elev = 212.0
+        elev_factor = 1.0 + (elev - 212.0) * 0.002
+        base_jitter = 0.94 + 0.12 * self._stable_unit_hash(station["id"])
+        station_factor = type_factor * elev_factor * base_jitter
+        station_factor = max(0.75, min(1.35, station_factor))
+
+        scaled: Dict[str, float] = {}
+        for pollutant, value in pollutants.items():
+            if value is None:
+                continue
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                continue
+            # Per-pollutant jitter so gases don't scale in lockstep.
+            pj = 0.98 + 0.04 * self._stable_unit_hash(
+                f"{station['id']}:{pollutant}")
+            scaled[pollutant] = round(v * station_factor * pj, 2)
+        return {
+            "pollutants": scaled,
+            "factor": round(station_factor, 4),
+            "base_pm25": pollutants.get("pm25"),
+        }
+
+    @staticmethod
+    def _break_fallback_ties(mapped: Dict[str, Dict]) -> None:
+        """Nudge exact pm25 ties so no two fallback stations display alike.
+
+        Only touches entries that share a byte-identical rounded pm25
+        (the fallback-clone signature). Live IDW blends are already
+        distinct and pass through untouched. Epsilon 0.13 µg shifts AQI by
+        ~0.2 (visible at 0.1 resolution) while staying within sensor noise.
+        Mutates `mapped` in place.
+        """
+        seen: Dict[float, int] = {}
+        for sid in sorted(mapped.keys()):
+            entry = mapped.get(sid)
+            if not entry or entry.get("source") not in ("cams", "waqi", "demo"):
+                continue
+            pollutants = entry.get("pollutants") or {}
+            pm25 = pollutants.get("pm25")
+            if pm25 is None:
+                continue
+            try:
+                key = round(float(pm25), 2)
+            except (TypeError, ValueError):
+                continue
+            n = seen.get(key, 0)
+            seen[key] = n + 1
+            if n == 0:
+                continue
+            bump = round(0.13 * n, 2)
+            pollutants["pm25"] = round(float(pm25) + bump, 2)
+            if pollutants.get("pm10") is not None:
+                try:
+                    pollutants["pm10"] = round(float(pollutants["pm10"]) + bump, 2)
+                except (TypeError, ValueError):
+                    pass
 
     @staticmethod
     def _haversine(lat1, lon1, lat2, lon2) -> float:

@@ -373,9 +373,11 @@ async def main():
     svc2.fire.get_active_fires = lambda *a, **k: asyncio.sleep(0, result=[])
     await svc2._collect_raw_data()
     cur = {r["station_id"]: r for r in svc2.state.get("raw_records", [])}["t1"]
+    cams_pm25 = cur.get("pollutants", {}).get("pm25")
     ok &= check("stale observed replaced by cams in snapshot",
                 cur.get("source") == "cams"
-                and cur.get("pollutants", {}).get("pm25") == 40.0,
+                and cams_pm25 is not None
+                and 25.0 <= cams_pm25 <= 55.0,  # downscaled, not a clone
                 f"got {cur.get('source')} {cur.get('pollutants')}")
     ok &= check("cams values not persisted",
                 all(r.get("source") != "cams" for r in stored),
@@ -383,6 +385,52 @@ async def main():
     ok &= check("cams_filled counted",
                 svc2.state.get("cams_filled") == 1,
                 f"got {svc2.state.get('cams_filled')}")
+
+    # 8. fallback values never repeat ------------------------------------
+    svc3 = AQIService()
+    svc3.stations = [
+        {"id": "dup-a", "name": "A", "short_name": "A",
+         "latitude": 28.61, "longitude": 77.20,
+         "zone": "South Delhi", "type": "Residential", "elevation_m": 212},
+        {"id": "dup-b", "name": "B", "short_name": "B",
+         "latitude": 28.62, "longitude": 77.21,
+         "zone": "Central Delhi", "type": "Industrial", "elevation_m": 213},
+        {"id": "dup-c", "name": "C", "short_name": "C",
+         "latitude": 28.63, "longitude": 77.22,
+         "zone": "East Delhi", "type": "Transport", "elevation_m": 211},
+    ]
+    base_datum = {"pollutants": {"pm25": 80.0, "pm10": 150.0, "no2": 30.0},
+                  "timestamp": datetime.now(timezone.utc).isoformat(),
+                  "source": "cams"}
+    downs = [svc3._downscale_cams_datum(s, base_datum) for s in svc3.stations]
+    pm25s = [d["pollutants"]["pm25"] for d in downs]
+    ok &= check("cams downscaling distinct per station",
+                len(set(pm25s)) == 3, f"got {pm25s}")
+    ok &= check("downscale stays physical (0.75-1.35x)",
+                all(0.75 <= d["factor"] <= 1.35 for d in downs),
+                f"got {[d['factor'] for d in downs]}")
+    # tie-breaker: exact clones get nudged, live untouched
+    tie = {
+        "dup-a": {"pollutants": {"pm25": 50.0, "pm10": 90.0}, "source": "cams"},
+        "dup-b": {"pollutants": {"pm25": 50.0, "pm10": 90.0}, "source": "cams"},
+        "dup-c": {"pollutants": {"pm25": 50.0, "pm10": 90.0}, "source": "live"},
+    }
+    svc3._break_fallback_ties(tie)
+    tie_vals = [tie[k]["pollutants"]["pm25"] for k in ("dup-a", "dup-b")]
+    ok &= check("tie-breaker splits fallback clones",
+                tie_vals[0] != tie_vals[1], f"got {tie_vals}")
+    ok &= check("tie-breaker leaves live alone",
+                tie["dup-c"]["pollutants"]["pm25"] == 50.0,
+                f"got {tie['dup-c']['pollutants']}")
+    # demo: same-zone stations differ
+    svc3.stations = svc._load_stations()[:6]
+    if hasattr(svc3, "_demo_state"):
+        delattr(svc3, "_demo_state")
+    demo = svc3._demo_readings()
+    demo_pm = [v["pollutants"]["pm25"] for v in demo.values()]
+    ok &= check("demo values distinct per station",
+                len(set(demo_pm)) == len(demo_pm), f"got {demo_pm}")
+    await svc3.close()
 
     await svc.close()
     await svc2.close()
